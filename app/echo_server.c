@@ -1,5 +1,8 @@
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <inttypes.h>
+#include <net/if.h>
+#include <netpacket/packet.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -58,6 +61,82 @@ parse_ipv4_arg(const char *arg, uint32_t *ip_be)
 }
 
 static int
+find_interface_mac_by_ip(uint32_t ip_be, struct rte_ether_addr *mac, char *ifname, size_t ifname_len)
+{
+    struct ifaddrs *ifaddr;
+    struct ifaddrs *ifa;
+    char target_name[IF_NAMESIZE] = {0};
+    int found = -1;
+
+    if (getifaddrs(&ifaddr) != 0) {
+        return -1;
+    }
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        struct sockaddr_in *addr_in;
+
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+
+        addr_in = (struct sockaddr_in *)ifa->ifa_addr;
+        if (addr_in->sin_addr.s_addr == ip_be) {
+            snprintf(target_name, sizeof(target_name), "%s", ifa->ifa_name);
+            break;
+        }
+    }
+
+    if (target_name[0] == '\0') {
+        freeifaddrs(ifaddr);
+        return -1;
+    }
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        struct sockaddr_ll *addr_ll;
+
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_PACKET) {
+            continue;
+        }
+        if (strcmp(ifa->ifa_name, target_name) != 0) {
+            continue;
+        }
+
+        addr_ll = (struct sockaddr_ll *)ifa->ifa_addr;
+        if (addr_ll->sll_halen != RTE_ETHER_ADDR_LEN) {
+            continue;
+        }
+
+        memcpy(mac->addr_bytes, addr_ll->sll_addr, RTE_ETHER_ADDR_LEN);
+        if (ifname != NULL && ifname_len > 0) {
+            snprintf(ifname, ifname_len, "%s", target_name);
+        }
+        found = 0;
+        break;
+    }
+
+    freeifaddrs(ifaddr);
+    return found;
+}
+
+static int
+find_dpdk_port_by_mac(const struct rte_ether_addr *target_mac, uint16_t *port_id)
+{
+    uint16_t port;
+
+    RTE_ETH_FOREACH_DEV(port) {
+        struct rte_ether_addr mac;
+
+        rte_eth_macaddr_get(port, &mac);
+        if (rte_is_same_ether_addr(&mac, target_mac)) {
+            *port_id = port;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int
 port_init(uint16_t port_id, struct rte_mempool *mbuf_pool)
 {
     struct rte_eth_conf port_conf;
@@ -112,8 +191,6 @@ port_init(uint16_t port_id, struct rte_mempool *mbuf_pool)
     if (ret < 0) {
         return ret;
     }
-
-    rte_eth_promiscuous_enable(port_id);
     return 0;
 }
 
@@ -232,9 +309,10 @@ main(int argc, char **argv)
 {
     struct app_config cfg;
     struct rte_mempool *mbuf_pool;
+    struct rte_ether_addr local_mac;
+    char ifname[IF_NAMESIZE];
     char *eal_argv[] = {argv[0], NULL};
     struct in_addr local_ip;
-    uint16_t nb_ports;
     int ret;
 
     if (argc != 2) {
@@ -243,12 +321,14 @@ main(int argc, char **argv)
     }
 
     memset(&cfg, 0, sizeof(cfg));
-    cfg.port_id = 0;
     cfg.queue_id = 0;
 
     if (parse_ipv4_arg(argv[1], &cfg.local_ip_be) != 0) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
+    }
+    if (find_interface_mac_by_ip(cfg.local_ip_be, &local_mac, ifname, sizeof(ifname)) != 0) {
+        rte_exit(EXIT_FAILURE, "Could not find a Linux interface with IP %s\n", argv[1]);
     }
 
     force_quit = false;
@@ -259,10 +339,10 @@ main(int argc, char **argv)
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "Failed to initialize DPDK EAL\n");
     }
-
-    nb_ports = rte_eth_dev_count_avail();
-    if (nb_ports == 0) {
-        rte_exit(EXIT_FAILURE, "No DPDK ports are available\n");
+    if (find_dpdk_port_by_mac(&local_mac, &cfg.port_id) != 0) {
+        rte_exit(EXIT_FAILURE,
+                 "Could not map interface %s to a DPDK port; refusing to touch other NICs\n",
+                 ifname);
     }
 
     mbuf_pool = rte_pktmbuf_pool_create(
@@ -282,8 +362,12 @@ main(int argc, char **argv)
     }
 
     local_ip.s_addr = cfg.local_ip_be;
-    printf("Echo server listening on port %" PRIu16 " for %s\n",
-           cfg.port_id, inet_ntoa(local_ip));
+    printf("Echo server using interface %s, port %" PRIu16 ", IP %s, MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+           ifname,
+           cfg.port_id,
+           inet_ntoa(local_ip),
+           local_mac.addr_bytes[0], local_mac.addr_bytes[1], local_mac.addr_bytes[2],
+           local_mac.addr_bytes[3], local_mac.addr_bytes[4], local_mac.addr_bytes[5]);
 
     run_echo_loop(&cfg);
 

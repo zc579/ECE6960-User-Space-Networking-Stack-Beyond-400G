@@ -67,3 +67,28 @@ Use these numbers to identify the first bottleneck. For example, high `tx_cycles
 - Source files now live under `app/`, and the shared header is `app/dpdk.h`.
 - The current `echo_server` and `packet_gen_client` follow the starter-code style that uses helpers from `dpdk.h`.
 - The experimental NIC selection still depends on the logic inside `app/dpdk.h`, so confirm that `dpdk_port` refers to the experimental interface before running on CloudLab.
+
+## Plotting single-core stage share
+You can save the server output and use the plotting script in `analysis/` to generate a bar chart for the stage breakdown.
+
+Example:
+
+```bash
+mkdir -p results/raw
+sudo ./echo_server 10.16.1.1 | tee results/raw/echo_single_core.log
+python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo_single_core.log
+```
+
+By default, the script selects the `[profile]` sample with the highest `rx_mpps` and writes:
+
+```text
+results/processed/single_core_stage_breakdown.png
+```
+
+You can also choose the last sample explicitly:
+
+```bash
+python3 analysis/plot_single_core_stage_breakdown.py \
+  results/raw/echo_single_core.log \
+  --mode last
+```

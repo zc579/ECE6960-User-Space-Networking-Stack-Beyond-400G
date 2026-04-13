@@ -72,7 +72,7 @@ Use these numbers to identify the first bottleneck. For example, high `tx_cycles
 You can save the server output and use the plotting script in `analysis/` to generate a bar chart for the stage breakdown.
 
 Example:
-
+On node 0:
 ```bash
 mkdir -p results/raw
 sudo ./echo_server 10.16.1.1 | tee results/raw/echo_single_core.log

@@ -37,18 +37,20 @@ static unsigned int num_queues = 1;
 /* offload checksum calculations */
 static const struct rte_eth_conf port_conf_default = {
 	.rxmode = {
-		.offloads = RTE_ETH_RX_OFFLOAD_IPV4_CKSUM,
-	},
-	.txmode = {
-		.offloads = RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_TX_OFFLOAD_UDP_CKSUM,
-	},
+        .mq_mode = RTE_ETH_MQ_RX_NONE,
+        .offloads = 0,
+    },
+    .txmode = {
+        .mq_mode = RTE_ETH_MQ_TX_NONE,
+        .offloads = 0,
+    },
 };
 
 #define MAKE_IP_ADDR(a, b, c, d)			\
 	(((uint32_t) a << 24) | ((uint32_t) b << 16) |	\
 	 ((uint32_t) c << 8) | (uint32_t) d)
 
-static unsigned int dpdk_port = 1;
+static unsigned int dpdk_port = 0;
 static uint8_t mode;
 struct rte_mempool *rx_mbuf_pool;
 struct rte_mempool *tx_mbuf_pool;

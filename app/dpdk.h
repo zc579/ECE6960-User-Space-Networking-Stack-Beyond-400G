@@ -83,70 +83,68 @@ static int str_to_ip(const char *str, uint32_t *addr)
 static inline int
 port_init(uint8_t port, struct rte_mempool *mbuf_pool, unsigned int n_queues)
 {
-	struct rte_eth_conf port_conf = port_conf_default;
-	const uint16_t rx_rings = n_queues, tx_rings = n_queues;
-	uint16_t nb_rxd = RX_RING_SIZE;
-	uint16_t nb_txd = TX_RING_SIZE;
-	int retval;
-	uint16_t q;
-	struct rte_eth_dev_info dev_info;
-	struct rte_eth_txconf *txconf;
+    struct rte_eth_conf port_conf = port_conf_default;
+    const uint16_t rx_rings = n_queues, tx_rings = n_queues;
+    uint16_t nb_rxd = RX_RING_SIZE;
+    uint16_t nb_txd = TX_RING_SIZE;
+    int retval;
+    uint16_t q;
+    struct rte_eth_dev_info dev_info;
+    struct rte_eth_rxconf rxconf;
+    struct rte_eth_txconf txconf;
 
-	printf("initializing with %u queues\n", n_queues);
+    printf("initializing port %u with %u queues\n", port, n_queues);
 
-	if (!rte_eth_dev_is_valid_port(port))
-		return -1;
+    if (!rte_eth_dev_is_valid_port(port))
+        return -1;
 
-	/* Configure the Ethernet device. */
-	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
-	if (retval != 0)
-		return retval;
+    retval = rte_eth_dev_info_get(port, &dev_info);
+    if (retval != 0)
+        return retval;
 
-	retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
-	if (retval != 0)
-		return retval;
+    retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
+    if (retval != 0)
+        return retval;
 
-	/* Allocate and set up 1 RX queue per Ethernet port. */
-	for (q = 0; q < rx_rings; q++) {
-		retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
-                                        rte_eth_dev_socket_id(port), NULL,
-                                        mbuf_pool);
-		if (retval < 0)
-			return retval;
-	}
+    retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
+    if (retval != 0)
+        return retval;
 
-	/* Enable TX offloading */
-	rte_eth_dev_info_get(0, &dev_info);
-	txconf = &dev_info.default_txconf;
+    rxconf = dev_info.default_rxconf;
+    txconf = dev_info.default_txconf;
 
-	/* Allocate and set up 1 TX queue per Ethernet port. */
-	for (q = 0; q < tx_rings; q++) {
-		retval = rte_eth_tx_queue_setup(port, q, nb_txd,
-                                        rte_eth_dev_socket_id(port), txconf);
-		if (retval < 0)
-			return retval;
-	}
+    for (q = 0; q < rx_rings; q++) {
+        retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
+                                        rte_eth_dev_socket_id(port),
+                                        &rxconf, mbuf_pool);
+        if (retval < 0)
+            return retval;
+    }
 
-	/* Start the Ethernet port. */
-	retval = rte_eth_dev_start(port);
-	if (retval < 0)
-		return retval;
+    for (q = 0; q < tx_rings; q++) {
+        retval = rte_eth_tx_queue_setup(port, q, nb_txd,
+                                        rte_eth_dev_socket_id(port),
+                                        &txconf);
+        if (retval < 0)
+            return retval;
+    }
 
-	/* Display the port MAC address. */
-	rte_eth_macaddr_get(port, &my_eth);
-	printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
-			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
-			(unsigned)port,
-			my_eth.addr_bytes[0], my_eth.addr_bytes[1],
-			my_eth.addr_bytes[2], my_eth.addr_bytes[3],
-			my_eth.addr_bytes[4], my_eth.addr_bytes[5]);
+    retval = rte_eth_dev_start(port);
+    if (retval < 0)
+        return retval;
 
-	/* Enable RX in promiscuous mode for the Ethernet device. */
-	rte_eth_promiscuous_enable(port);
+    rte_eth_macaddr_get(port, &my_eth);
+    printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+           " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
+           (unsigned)port,
+           my_eth.addr_bytes[0], my_eth.addr_bytes[1],
+           my_eth.addr_bytes[2], my_eth.addr_bytes[3],
+           my_eth.addr_bytes[4], my_eth.addr_bytes[5]);
 
-	return 0;
+    rte_eth_promiscuous_enable(port);
+
+    return 0;
 }
-
 /*
  * Validate this ethernet header. Return true if this packet is for higher
  * layers, false otherwise.
@@ -231,7 +229,8 @@ static void craft_packet(struct rte_mbuf *buf, uint8_t port)
 
 	buf->l2_len = RTE_ETHER_HDR_LEN;
 	buf->l3_len = sizeof(struct rte_ipv4_hdr);
-	buf->ol_flags = RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
+	buf->ol_flags = 0;
+	ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
 }
 
 /*

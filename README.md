@@ -8,6 +8,137 @@ This repository currently tracks the warmup DPDK echo-server assignment and rela
 - `app/dpdk.h`: shared DPDK helper definitions used by both programs
 - `Makefile`: root-level build entry that compiles both apps
 
+## Hardware setup
+The following steps document the 100G hardware bring-up path used on the newer CloudLab environment. This flow assumes the target experimental port is `0000:17:00.0` and the Linux interface is `ens1f0`.
+
+### 1. Confirm machine and NIC status
+
+```bash
+uname -r
+lspci | grep -i -E 'Ethernet|E810'
+ip link
+sudo /usr/local/bin/dpdk-devbind.py --status
+```
+
+Confirm that `0000:17:00.0` is the target experimental port before continuing.
+
+### 2. Install base dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  meson ninja-build pkg-config \
+  libnuma-dev libpcap-dev python3-pyelftools \
+  linux-headers-$(uname -r) \
+  ethtool pciutils git wget
+```
+
+DPDK 22.11 on Linux is built from source with Meson and Ninja. Extra optional components are enabled or disabled depending on which system dependencies are available.
+
+### 3. Install Intel official `ice` driver and DDP package
+
+Intel's `ice` driver README notes that `make install` will also install the default DDP package. During initialization, the driver looks for `intel/ice/ddp/ice.pkg`.
+
+```bash
+cd ~
+rm -rf ethernet-linux-ice
+git clone https://github.com/intel/ethernet-linux-ice.git
+cd ethernet-linux-ice/src
+
+make -j"$(nproc)"
+sudo make install
+```
+
+### 4. Reboot instead of unloading the `ice` module
+
+This ensures:
+
+- the new `ice` driver takes effect
+- the new DDP package is loaded
+- SSH is not interrupted by `modprobe -r ice`
+
+```bash
+sudo reboot
+```
+
+### 5. Verify the new driver and DDP package after reconnecting
+
+```bash
+ethtool -i ens1f0
+ls -l /lib/firmware/updates/intel/ice/ddp/
+ls -l /lib/firmware/intel/ice/ddp/
+dmesg | grep -i ice | tail -n 100
+```
+
+Expected signs:
+
+- `driver: ice`
+- `version: 2.5.4`
+- `/lib/firmware/updates/intel/ice/ddp/ice.pkg -> ice-1.3.56.0.pkg`
+- `The DDP package was successfully loaded`
+
+Intel's out-of-tree `ice` driver prefers firmware files from `/lib/firmware/updates/`.
+
+### 6. Install DPDK 22.11
+
+DPDK 22.11 uses the standard `meson setup build`, `ninja -C build`, and `ninja install` flow, with installation typically landing under `/usr/local`.
+
+```bash
+cd ~
+rm -rf dpdk
+git clone https://github.com/DPDK/dpdk.git
+cd dpdk
+git fetch --all --tags
+git switch -c dpdk-22.11-test v22.11.6
+
+meson setup build
+ninja -C build
+sudo ninja -C build install
+sudo ldconfig
+```
+
+Then confirm the installed version:
+
+```bash
+pkg-config --modversion libdpdk
+```
+
+You should see `22.11.x`.
+
+### 7. Enable VFIO no-IOMMU mode
+
+DPDK documentation notes that when IOMMU is unavailable, VFIO can still be used if `enable_unsafe_noiommu_mode=1` is enabled.
+
+```bash
+sudo modprobe vfio
+sudo modprobe vfio-pci
+echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
+cat /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
+```
+
+Expected output is `Y` or `1`.
+
+### 8. Bind the target port to `vfio-pci`
+
+First confirm the target port is still using `ice`:
+
+```bash
+sudo /usr/local/bin/dpdk-devbind.py --status
+```
+
+Then bring the interface down and bind the PCI function:
+
+```bash
+sudo ip link set ens1f0 down
+sudo /usr/local/bin/dpdk-devbind.py -b vfio-pci 0000:17:00.0
+sudo /usr/local/bin/dpdk-devbind.py --status
+```
+
+Expected result:
+
+- `0000:17:00.0` appears under `Network devices using DPDK-compatible driver`
+
 ## Quick use on CloudLab
 On both nodes:
 

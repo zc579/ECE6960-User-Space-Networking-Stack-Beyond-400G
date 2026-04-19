@@ -5,10 +5,8 @@
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
-#include <rte_ip.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
-#include <rte_udp.h>
 
 #define RX_RING_SIZE 128
 #define TX_RING_SIZE 128
@@ -22,15 +20,14 @@
 
 #define FULL_MASK 0xFFFFFFFF
 #define EMPTY_MASK 0x0
+#define ECHO_ETHER_TYPE 0x88B5
 
 static uint64_t snd_times[MAX_SAMPLES];
 static uint64_t rcv_times[MAX_SAMPLES];
 
 /* parameters */
 static int seconds = 5;
-size_t payload_len = 22; /* total packet size of 64 bytes */
-static unsigned int client_port = 50000;
-static unsigned int server_port = 8001;
+size_t payload_len = 46; /* total Ethernet frame size of 64 bytes */
 static unsigned int num_queues = 1;
 
 
@@ -46,34 +43,17 @@ static const struct rte_eth_conf port_conf_default = {
     },
 };
 
-#define MAKE_IP_ADDR(a, b, c, d)			\
-	(((uint32_t) a << 24) | ((uint32_t) b << 16) |	\
-	 ((uint32_t) c << 8) | (uint32_t) d)
-
 static unsigned int dpdk_port = 0;
 static uint8_t mode;
 struct rte_mempool *rx_mbuf_pool;
 struct rte_mempool *tx_mbuf_pool;
 static struct rte_ether_addr my_eth;
-static uint32_t my_ip;
-static uint32_t server_ip;
 struct rte_ether_addr zero_mac = {
 		.addr_bytes = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0}
 };
 struct rte_ether_addr broadcast_mac = {
 		.addr_bytes = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 };
-
-static int str_to_ip(const char *str, uint32_t *addr)
-{
-	uint8_t a, b, c, d;
-	if(sscanf(str, "%hhu.%hhu.%hhu.%hhu", &a, &b, &c, &d) != 4) {
-		return -EINVAL;
-	}
-
-	*addr = MAKE_IP_ADDR(a, b, c, d);
-	return 0;
-}
 
 
 /*
@@ -146,8 +126,7 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool, unsigned int n_queues)
     return 0;
 }
 /*
- * Validate this ethernet header. Return true if this packet is for higher
- * layers, false otherwise.
+ * Validate this Ethernet header for our custom L2 echo protocol.
  */
 static bool check_eth_hdr(struct rte_mbuf *buf)
 {
@@ -159,25 +138,8 @@ static bool check_eth_hdr(struct rte_mbuf *buf)
 		return false;
 	}
 
-	if (ptr_mac_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
-		/* packet not IPv4 */
-		return false;
-
-	return true;
-}
-
-/*
- * Return true if this IP packet is to us and contains a UDP packet,
- * false otherwise.
- */
-static bool check_ip_hdr(struct rte_mbuf *buf)
-{
-	struct rte_ipv4_hdr *ipv4_hdr;
-
-	ipv4_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_ipv4_hdr *,
-			RTE_ETHER_HDR_LEN);
-	if (ipv4_hdr->dst_addr != rte_cpu_to_be_32(my_ip)
-			|| ipv4_hdr->next_proto_id != IPPROTO_UDP)
+	if (ptr_mac_hdr->ether_type != rte_cpu_to_be_16(ECHO_ETHER_TYPE))
+		/* packet not our custom echo frame */
 		return false;
 
 	return true;
@@ -185,13 +147,10 @@ static bool check_ip_hdr(struct rte_mbuf *buf)
 
 struct rte_ether_addr static_server_eth;
 
-static void craft_packet(struct rte_mbuf *buf, uint8_t port)
+static void craft_packet(struct rte_mbuf *buf)
 {
-	struct rte_ether_hdr *ptr_mac_hdr;
 	char *buf_ptr;
 	struct rte_ether_hdr *eth_hdr;
-	struct rte_ipv4_hdr *ipv4_hdr;
-	struct rte_udp_hdr *rte_udp_hdr;
 
 	/* ethernet header */
 	buf_ptr = rte_pktmbuf_append(buf, RTE_ETHER_HDR_LEN);
@@ -199,38 +158,15 @@ static void craft_packet(struct rte_mbuf *buf, uint8_t port)
 
 	rte_ether_addr_copy(&my_eth, &eth_hdr->src_addr);
 	rte_ether_addr_copy(&static_server_eth, &eth_hdr->dst_addr);
-	eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+	eth_hdr->ether_type = rte_cpu_to_be_16(ECHO_ETHER_TYPE);
 
-	/* IPv4 header */
-	buf_ptr = rte_pktmbuf_append(buf, sizeof(struct rte_ipv4_hdr));
-	ipv4_hdr = (struct rte_ipv4_hdr *) buf_ptr;
-	ipv4_hdr->version_ihl = 0x45;
-	ipv4_hdr->type_of_service = 0;
-	ipv4_hdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) +
-			sizeof(struct rte_udp_hdr) + payload_len);
-	ipv4_hdr->packet_id = 0;
-	ipv4_hdr->fragment_offset = 0;
-	ipv4_hdr->time_to_live = 64;
-	ipv4_hdr->next_proto_id = IPPROTO_UDP;
-	ipv4_hdr->hdr_checksum = 0;
-	ipv4_hdr->src_addr = rte_cpu_to_be_32(my_ip);
-	ipv4_hdr->dst_addr = rte_cpu_to_be_32(server_ip);
-
-	/* UDP header + fake data */
-	buf_ptr = rte_pktmbuf_append(buf,
-			sizeof(struct rte_udp_hdr) + payload_len);
-	rte_udp_hdr = (struct rte_udp_hdr *) buf_ptr;
-	rte_udp_hdr->src_port = rte_cpu_to_be_16(client_port);
-	rte_udp_hdr->dst_port = rte_cpu_to_be_16(server_port);
-	rte_udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr)
-			+ payload_len);
-	rte_udp_hdr->dgram_cksum = 0;
-	memset(buf_ptr + sizeof(struct rte_udp_hdr), 0xAB, payload_len);
+	/* payload */
+	buf_ptr = rte_pktmbuf_append(buf, payload_len);
+	memset(buf_ptr, 0xAB, payload_len);
 
 	buf->l2_len = RTE_ETHER_HDR_LEN;
-	buf->l3_len = sizeof(struct rte_ipv4_hdr);
+	buf->l3_len = 0;
 	buf->ol_flags = 0;
-	ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
 }
 
 /*

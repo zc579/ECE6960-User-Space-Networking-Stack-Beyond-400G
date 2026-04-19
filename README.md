@@ -153,28 +153,30 @@ If `make` cannot find `libdpdk`, make sure DPDK is installed and that `pkg-confi
 On node 0:
 
 ```bash
-sudo ./echo_server 10.16.1.1
+sudo ./echo_server
 ```
 
 On node 1:
 
 ```bash
-sudo ./packet_gen_client 64 10.16.1.2 10.16.1.1 ec:b1:d7:85:2a:93
+sudo ./packet_gen_client 64 40:A6:B7:C3:3E:00
 ```
+
+The applications now use a custom Layer-2 echo frame and do not depend on IPv4 or UDP headers.
+The client only needs the server MAC address.
 
 ## Echo server profiling
 The echo server now prints stage-level profiling once per second. The datapath is split into:
 
 - `RX`: receiving packets with `rte_eth_rx_burst`
-- `Parse`: locating Ethernet, IPv4, and UDP headers inside each mbuf
-- `Rewrite`: swapping Ethernet source/destination MACs, IPv4 source/destination addresses, and UDP source/destination ports
-- `Checksum`: recomputing IPv4 and UDP checksums after rewriting headers
+- `Parse`: locating the Ethernet header inside each mbuf
+- `Rewrite`: swapping Ethernet source/destination MAC addresses
 - `TX`: sending the packet back with `rte_eth_tx_burst`
 
 Example output:
 
 ```text
-[profile] rx_pkts=... tx_pkts=... tx_drops=... rx_mpps=... tx_mpps=... avg_burst=... rx_cycles/burst=... rx_cycles/pkt=... parse_cycles/pkt=... rewrite_cycles/pkt=... checksum_cycles/pkt=... tx_cycles/pkt=... cpu_ghz=...
+[profile] rx_pkts=... tx_pkts=... tx_drops=... rx_mpps=... tx_mpps=... avg_burst=... rx_cycles/burst=... rx_cycles/pkt=... parse_cycles/pkt=... rewrite_cycles/pkt=... tx_cycles/pkt=... cpu_ghz=...
 ```
 
 Field meanings:
@@ -185,18 +187,17 @@ Field meanings:
 - `avg_burst`: average number of packets returned by each `rte_eth_rx_burst` call
 - `rx_cycles/burst`: average CPU cycles per RX burst call
 - `rx_cycles/pkt`: RX cost amortized per received packet
-- `parse_cycles/pkt`: per-packet header parsing cost
-- `rewrite_cycles/pkt`: per-packet header swap cost
-- `checksum_cycles/pkt`: per-packet checksum recomputation cost
+- `parse_cycles/pkt`: per-packet Ethernet header parsing cost
+- `rewrite_cycles/pkt`: per-packet MAC swap cost
 - `tx_cycles/pkt`: per-packet TX cost
 
 `BURST_SIZE` is defined in `app/dpdk.h`. It is the maximum number of packets that one RX burst call tries to receive. If `avg_burst` is close to 1, batching is not being used effectively; if it is closer to `BURST_SIZE`, the fixed RX cost is better amortized across packets.
 
-Use these numbers to identify the first bottleneck. For example, high `tx_cycles/pkt` suggests the current per-packet TX path should be optimized with batched transmit. High `checksum_cycles/pkt` suggests checksum recomputation or checksum offload should be investigated.
+Use these numbers to identify the first bottleneck. For example, high `tx_cycles/pkt` suggests the current per-packet TX path should be optimized with batched transmit.
 
 ## Notes
 - Source files now live under `app/`, and the shared header is `app/dpdk.h`.
-- The current `echo_server` and `packet_gen_client` follow the starter-code style that uses helpers from `dpdk.h`.
+- The current `echo_server` and `packet_gen_client` implement a custom L2 echo protocol with EtherType `0x88B5`.
 - The experimental NIC selection still depends on the logic inside `app/dpdk.h`, so confirm that `dpdk_port` refers to the experimental interface before running on CloudLab.
 
 ## Plotting single-core stage share
@@ -206,7 +207,7 @@ Example:
 On node 0:
 ```bash
 mkdir -p results/raw
-sudo ./echo_server 10.16.1.1 | tee results/raw/echo_single_core.log
+sudo ./echo_server | tee results/raw/echo_single_core.log
 python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo_single_core.log
 ```
 

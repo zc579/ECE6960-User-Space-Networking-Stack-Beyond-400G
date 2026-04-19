@@ -7,10 +7,8 @@
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
-#include <rte_ip.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
-#include <rte_udp.h>
 
 #include "dpdk.h"
 
@@ -24,7 +22,6 @@ struct echo_profile {
     uint64_t rx_cycles;
     uint64_t parse_cycles;
     uint64_t rewrite_cycles;
-    uint64_t checksum_cycles;
     uint64_t tx_cycles;
 };
 
@@ -60,7 +57,7 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
     printf("[profile] rx_pkts=%" PRIu64 " tx_pkts=%" PRIu64
            " tx_drops=%" PRIu64 " rx_mpps=%.3f tx_mpps=%.3f avg_burst=%.2f"
            " rx_cycles/burst=%.1f rx_cycles/pkt=%.1f parse_cycles/pkt=%.1f"
-           " rewrite_cycles/pkt=%.1f checksum_cycles/pkt=%.1f tx_cycles/pkt=%.1f"
+           " rewrite_cycles/pkt=%.1f tx_cycles/pkt=%.1f"
            " cpu_ghz=%.3f\n",
            stats->rx_packets,
            stats->tx_packets,
@@ -72,7 +69,6 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
            cycles_per_packet(stats->rx_cycles, stats->rx_packets),
            cycles_per_packet(stats->parse_cycles, stats->rx_packets),
            cycles_per_packet(stats->rewrite_cycles, stats->rx_packets),
-           cycles_per_packet(stats->checksum_cycles, stats->rx_packets),
            cycles_per_packet(stats->tx_cycles, stats->tx_packets),
            (double)hz / 1000000000.0);
 }
@@ -123,20 +119,10 @@ run_server(void)
         for (uint16_t i = 0; i < nb_rx; i++) {
             struct rte_mbuf *buf = rx_bufs[i];
             struct rte_ether_hdr *eth_hdr;
-            struct rte_ipv4_hdr *ipv4_hdr;
-            struct rte_udp_hdr *udp_hdr;
             struct rte_ether_addr tmp_eth_addr;
-            rte_be32_t tmp_ip_addr;
-            rte_be16_t tmp_udp_port;
 
             t0 = rte_get_timer_cycles();
             eth_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr *);
-            ipv4_hdr = rte_pktmbuf_mtod_offset(
-                buf, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
-            udp_hdr = rte_pktmbuf_mtod_offset(
-                buf,
-                struct rte_udp_hdr *,
-                sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr));
             t1 = rte_get_timer_cycles();
             stats.parse_cycles += t1 - t0;
 
@@ -145,28 +131,8 @@ run_server(void)
             rte_ether_addr_copy(&eth_hdr->src_addr, &tmp_eth_addr);
             rte_ether_addr_copy(&eth_hdr->dst_addr, &eth_hdr->src_addr);
             rte_ether_addr_copy(&tmp_eth_addr, &eth_hdr->dst_addr);
-
-            /* Swap IPv4 source and destination addresses. */
-            tmp_ip_addr = ipv4_hdr->src_addr;
-            ipv4_hdr->src_addr = ipv4_hdr->dst_addr;
-            ipv4_hdr->dst_addr = tmp_ip_addr;
-
-            /* Swap UDP source and destination ports. */
-            tmp_udp_port = udp_hdr->src_port;
-            udp_hdr->src_port = udp_hdr->dst_port;
-            udp_hdr->dst_port = tmp_udp_port;
             t1 = rte_get_timer_cycles();
             stats.rewrite_cycles += t1 - t0;
-
-            /* Recompute checksums after modifying packet headers. */
-            t0 = rte_get_timer_cycles();
-            ipv4_hdr->hdr_checksum = 0;
-            ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
-
-            udp_hdr->dgram_cksum = 0;
-            udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
-            t1 = rte_get_timer_cycles();
-            stats.checksum_cycles += t1 - t0;
 
             /* Send the packet back. */
             t0 = rte_get_timer_cycles();
@@ -197,14 +163,14 @@ run_server(void)
 static int
 parse_echo_args(int argc, char *argv[])
 {
-    if (argc != 2) {
+    (void)argv;
+
+    if (argc != 1) {
         printf("argument number incorrect: %d\n", argc);
-        printf("usage: sudo ./echo_server <SERVER_IP>\n");
-        printf("example: sudo ./echo_server 10.16.1.1\n");
+        printf("usage: sudo ./echo_server\n");
         return -EINVAL;
     }
 
-    str_to_ip(argv[1], &my_ip);
     return 0;
 }
 

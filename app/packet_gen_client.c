@@ -1,14 +1,13 @@
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
-#include <rte_ip.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
-#include <rte_udp.h>
 #include "dpdk.h"
 
 static void client_latency_test(uint8_t port)
@@ -16,10 +15,8 @@ static void client_latency_test(uint8_t port)
 	uint64_t start_time, end_time;
 	struct rte_mbuf *bufs[BURST_SIZE];
 	struct rte_mbuf *buf;
-	struct rte_udp_hdr *rte_udp_hdr;
 	uint32_t nb_tx, nb_rx, i;
 	uint64_t correct_echos = 0, incorrect_echos = 0;
-	struct rte_ether_addr server_eth;
 	uint64_t time_received;
 	printf("\nDPDK Echo latency test start now!\n");
 	/* Verify that we have enough space for all the datapoints, assuming
@@ -36,7 +33,7 @@ static void client_latency_test(uint8_t port)
 		if (buf == NULL)
 			printf("error allocating tx mbuf\n");
 
-		craft_packet(buf, port);
+		craft_packet(buf);
 		
 		/* send packet */
 		snd_times[correct_echos] = rte_get_timer_cycles();
@@ -58,19 +55,14 @@ static void client_latency_test(uint8_t port)
 			// printf("got a packet back!");
 			for (i = 0; i < nb_rx; i++) {
 				buf = bufs[i];
+				struct rte_ether_hdr *eth_hdr;
 
 				if (!check_eth_hdr(buf))
 					goto no_match;
 
-				/* this packet is IPv4, check IP header */
-				if (!check_ip_hdr(buf))
-					goto no_match;
-
-				/* check UDP header */
-				rte_udp_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_udp_hdr *,
-						RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr));
-				if (rte_udp_hdr->src_port != rte_cpu_to_be_16(server_port) ||
-				    rte_udp_hdr->dst_port != rte_cpu_to_be_16(client_port))
+				eth_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr *);
+				if (!rte_is_same_ether_addr(&eth_hdr->src_addr,
+							    &static_server_eth))
 					goto no_match;
 
 				/* packet matches */
@@ -121,7 +113,7 @@ static void client_throughput_test(uint8_t port) {
         rte_exit(EXIT_FAILURE, "Failed to allocate template mbuf\n");
     }
 
-    craft_packet(template_buf, port);
+    craft_packet(template_buf);
 
     /* run for specified amount of time */
     start_time = rte_get_timer_cycles();
@@ -174,7 +166,7 @@ static void client_throughput_test(uint8_t port) {
     printf("DPDK Echo client request-per-seconds: %f\n",
            rps);
 	printf("DPDK Echo client throughput (Gbps): %f\n",
-           rps * (payload_len + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr)) * 8 / 1e9);
+           rps * (payload_len + sizeof(struct rte_ether_hdr)) * 8 / 1e9);
 }
 
 /*
@@ -196,31 +188,30 @@ static void run_client(uint8_t port)
 
 static int parse_echo_args(int argc, char *argv[])
 {
-	long tmp;
-	int next_arg;
+	long packet_size;
+	size_t header_len;
 
-if (argc < 3) {
+	if (argc != 3) {
         printf("argument number incorrect: %d\n", argc);
-        printf("usage: sudo ./packet_gen_client <PACKET_SIZE> <CLIENT_IP> <SERVER_IP> <SERVER_MAC>\n");
-        printf("example: sudo ./packet_gen_client 64 10.16.1.2 10.16.1.1 ec:b1:d7:85:5a:93\n");
+        printf("usage: sudo ./packet_gen_client <PACKET_SIZE> <SERVER_MAC>\n");
+        printf("example: sudo ./packet_gen_client 64 ec:b1:d7:85:5a:93\n");
         return -EINVAL;
     }
 
-	str_to_ip(argv[2], &my_ip);
+	packet_size = strtol(argv[1], NULL, 10);
+	header_len = sizeof(struct rte_ether_hdr);
+	if (packet_size <= 0 || (size_t)packet_size < header_len) {
+		printf("packet size must be at least %zu bytes\n", header_len);
+		return -EINVAL;
+	}
 
-	payload_len = (atoi(argv[1])) - (sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
-    
-    argc -= 3;
+	payload_len = (size_t)packet_size - header_len;
 
-    next_arg = 3;
-    str_to_ip(argv[next_arg++], &server_ip);
-    /* parse static server MAC addr from XX:XX:XX:XX:XX:XX */
-    rte_ether_unformat_addr(argv[next_arg++],
-                &static_server_eth);
-
-    printf("Client IP: %u.%u.%u.%u\n",
-                (my_ip >> 24) & 0xFF, (my_ip >> 16) & 0xFF,
-                (my_ip >> 8) & 0xFF, my_ip & 0xFF);
+	/* parse static server MAC addr from XX:XX:XX:XX:XX:XX */
+	if (rte_ether_unformat_addr(argv[2], &static_server_eth) != 0) {
+		printf("invalid server MAC address: %s\n", argv[2]);
+		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -251,4 +242,3 @@ main(int argc, char *argv[])
 
 	return 0;
 }
-

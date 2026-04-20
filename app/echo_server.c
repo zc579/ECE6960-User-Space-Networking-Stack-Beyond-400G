@@ -54,10 +54,13 @@ cycles_per_event(uint64_t cycles, uint64_t count)
 static void
 print_profile(const struct echo_profile *stats, uint64_t hz)
 {
-    /* Burst-normalized stage metrics use non-empty polls as the useful-batch
-     * denominator. This keeps avg_burst and cycles/burst aligned to batches
-     * that actually carried packets, while cycles/pkt amortizes everything
-     * over received packets.
+    /* Non-empty-batch-normalized stage metrics use non-empty polls as the
+     * useful-batch denominator. This keeps avg_burst and
+     * cycles/nonempty_batch aligned to batches that actually carried packets,
+     * while cycles/pkt amortizes everything over received packets.
+     *
+     * Poll-normalized metrics are printed separately so idle periods still
+     * show a meaningful per-poll cost even when rx_pkts == 0.
      */
     uint64_t accounted_cycles = stats->rx_cycles + stats->parse_cycles +
                                 stats->rewrite_cycles + stats->tx_cycles;
@@ -84,14 +87,17 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
            " rx_mpps=%.3f tx_mpps=%.3f"
            " avg_burst=%.2f pkts_per_nonempty_poll=%.2f"
            " empty_poll_ratio=%.4f"
-           " total_cycles/burst=%.1f total_cycles/pkt=%.1f"
-           " empty_poll_cycles/burst=%.1f empty_poll_cycles/pkt=%.1f"
-           " nonempty_poll_cycles/burst=%.1f nonempty_poll_cycles/pkt=%.1f"
-           " rx_cycles/burst=%.1f rx_cycles/pkt=%.1f"
-           " parse_cycles/burst=%.1f parse_cycles/pkt=%.1f"
-           " rewrite_cycles/burst=%.1f rewrite_cycles/pkt=%.1f"
-           " tx_cycles/burst=%.1f tx_cycles/pkt=%.1f"
-           " other_cycles/burst=%.1f other_cycles/pkt=%.1f"
+           " total_cycles/poll=%.1f"
+           " total_cycles/nonempty_batch=%.1f total_cycles/pkt=%.1f"
+           " empty_poll_cycles/nonempty_batch=%.1f"
+           " empty_poll_cycles/empty_poll=%.1f empty_poll_cycles/pkt=%.1f"
+           " nonempty_poll_cycles/nonempty_batch=%.1f"
+           " nonempty_poll_cycles/nonempty_poll=%.1f nonempty_poll_cycles/pkt=%.1f"
+           " rx_cycles/nonempty_batch=%.1f rx_cycles/pkt=%.1f"
+           " parse_cycles/nonempty_batch=%.1f parse_cycles/pkt=%.1f"
+           " rewrite_cycles/nonempty_batch=%.1f rewrite_cycles/pkt=%.1f"
+           " tx_cycles/nonempty_batch=%.1f tx_cycles/pkt=%.1f"
+           " other_cycles/nonempty_batch=%.1f other_cycles/pkt=%.1f"
            " cpu_ghz=%.3f\n",
            stats->rx_packets,
            stats->tx_packets,
@@ -105,10 +111,13 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
            avg_burst,
            pkts_per_nonempty_poll,
            empty_poll_ratio,
+           cycles_per_event(stats->total_loop_cycles, stats->poll_count),
            cycles_per_event(stats->total_loop_cycles, stats->nonempty_poll_count),
            cycles_per_packet(stats->total_loop_cycles, stats->rx_packets),
            cycles_per_event(stats->empty_poll_cycles, stats->nonempty_poll_count),
+           cycles_per_event(stats->empty_poll_cycles, stats->empty_poll_count),
            cycles_per_packet(stats->empty_poll_cycles, stats->rx_packets),
+           cycles_per_event(stats->nonempty_poll_cycles, stats->nonempty_poll_count),
            cycles_per_event(stats->nonempty_poll_cycles, stats->nonempty_poll_count),
            cycles_per_packet(stats->nonempty_poll_cycles, stats->rx_packets),
            cycles_per_event(stats->rx_cycles, stats->nonempty_poll_count),

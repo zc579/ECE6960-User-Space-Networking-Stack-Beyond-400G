@@ -1,5 +1,6 @@
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -310,15 +311,22 @@ run_server_worker(void *arg)
 static int
 parse_echo_args(int argc, char *argv[])
 {
-    (void)argv;
+    long worker_count;
 
-    if (argc != 1) {
+    if (argc != 2) {
         printf("argument number incorrect: %d\n", argc);
-        printf("usage: sudo ./echo_server\n");
+        printf("usage: sudo ./echo_server <NUM_WORKERS>\n");
+        printf("example: sudo ./echo_server 2\n");
         return -EINVAL;
     }
 
-    num_queues = SERVER_NUM_QUEUES;
+    worker_count = strtol(argv[1], NULL, 10);
+    if (worker_count <= 0 || worker_count > MAX_CORES) {
+        printf("num_workers must be in range [1, %d]\n", MAX_CORES);
+        return -EINVAL;
+    }
+
+    num_queues = (unsigned int)worker_count;
     my_ip = DEFAULT_SERVER_IP;
     return 0;
 }
@@ -331,7 +339,7 @@ main(int argc, char *argv[])
 {
     int args_parsed;
     int res;
-    struct worker_ctx worker_ctxs[SERVER_NUM_QUEUES];
+    struct worker_ctx *worker_ctxs;
     unsigned int used_workers = 0;
     unsigned int next_queue = 0;
     unsigned int lcore_id;
@@ -351,6 +359,13 @@ main(int argc, char *argv[])
     /* Initialize port. */
     if (port_init(dpdk_port, rx_mbuf_pool, num_queues) != 0) {
         rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu8 "\n", dpdk_port);
+    }
+
+    worker_ctxs = calloc(num_queues, sizeof(*worker_ctxs));
+    if (worker_ctxs == NULL) {
+        rte_exit(EXIT_FAILURE,
+                 "Cannot allocate worker contexts for %u queues\n",
+                 num_queues);
     }
 
     if (rte_lcore_count() < num_queues) {

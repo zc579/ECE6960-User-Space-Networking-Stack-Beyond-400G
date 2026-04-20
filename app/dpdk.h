@@ -23,7 +23,6 @@
 
 #define FULL_MASK 0xFFFFFFFF
 #define EMPTY_MASK 0x0
-#define SERVER_NUM_QUEUES 2
 #define CLIENT_NUM_QUEUES 1
 #define DEFAULT_NUM_FLOWS 128
 #define MAKE_IP_ADDR(a, b, c, d) \

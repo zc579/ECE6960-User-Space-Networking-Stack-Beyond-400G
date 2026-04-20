@@ -9,8 +9,20 @@
 #include <rte_ip.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_pause.h>
 #include <rte_udp.h>
 #include "dpdk.h"
+
+struct client_worker_ctx {
+	uint8_t queue_id;
+	unsigned int lcore_id;
+	uint64_t start_cycles;
+	uint64_t end_cycles;
+	uint64_t initial_flow_id;
+	uint64_t reqs;
+	uint64_t tx_sent;
+	uint64_t tx_drops;
+};
 
 static void client_latency_test(uint8_t port)
 {
@@ -168,7 +180,7 @@ static void client_throughput_test(uint8_t port) {
     end_time = rte_get_timer_cycles();
 
     float rps = (float)(reqs * rte_get_timer_hz()) / (end_time - start_time);
-    printf("DPDK Echo runs %f seconds, completed %" PRIu64 " echos\n",
+	printf("DPDK Echo runs %f seconds, completed %" PRIu64 " echos\n",
            (float)(end_time - start_time) / rte_get_timer_hz(), reqs);
 	printf("DPDK Echo client request-per-seconds: %f\n",
            rps);
@@ -176,6 +188,168 @@ static void client_throughput_test(uint8_t port) {
            rps * (payload_len + sizeof(struct rte_ether_hdr) +
                   sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr)) *
                      8 / 1e9);
+}
+
+static int
+client_throughput_worker(void *arg)
+{
+	struct client_worker_ctx *ctx = arg;
+	uint8_t port = dpdk_port;
+	struct rte_mbuf *bufs[BURST_SIZE];
+	struct rte_mbuf *pkts[BURST_SIZE];
+	uint64_t next_flow = ctx->initial_flow_id;
+
+	while (rte_get_timer_cycles() < ctx->start_cycles) {
+		rte_pause();
+	}
+
+	while (rte_get_timer_cycles() < ctx->end_cycles) {
+		uint32_t created_pkts = 0;
+
+		for (uint32_t i = 0; i < BURST_SIZE; i++) {
+			pkts[i] = rte_pktmbuf_alloc(tx_mbuf_pool);
+			if (unlikely(pkts[i] == NULL)) {
+				break;
+			}
+			craft_packet(pkts[i], next_flow);
+			next_flow += num_queues;
+			created_pkts++;
+		}
+
+		if (likely(created_pkts > 0)) {
+			uint32_t nb_tx = rte_eth_tx_burst(port, ctx->queue_id, pkts,
+							      created_pkts);
+			ctx->tx_sent += nb_tx;
+			ctx->tx_drops += created_pkts - nb_tx;
+
+			if (unlikely(nb_tx < created_pkts)) {
+				for (uint32_t i = nb_tx; i < created_pkts; i++) {
+					rte_pktmbuf_free(pkts[i]);
+				}
+			}
+		}
+
+		{
+			uint32_t nb_rx =
+				rte_eth_rx_burst(port, ctx->queue_id, bufs, BURST_SIZE);
+			ctx->reqs += nb_rx;
+			for (uint32_t i = 0; i < nb_rx; i++) {
+				rte_pktmbuf_free(bufs[i]);
+			}
+		}
+	}
+
+	printf("Client worker queue=%u lcore=%u tx_sent=%" PRIu64
+	       " tx_drops=%" PRIu64 " completed=%" PRIu64 "\n",
+	       ctx->queue_id,
+	       ctx->lcore_id,
+	       ctx->tx_sent,
+	       ctx->tx_drops,
+	       ctx->reqs);
+	return 0;
+}
+
+static void
+run_client_multiworker(uint8_t port)
+{
+	struct client_worker_ctx *worker_ctxs;
+	uint64_t start_cycles;
+	uint64_t end_cycles;
+	uint64_t total_reqs = 0;
+	uint64_t total_tx_sent = 0;
+	uint64_t total_tx_drops = 0;
+	unsigned int next_queue = 0;
+	unsigned int used_workers = 0;
+	unsigned int launched_lcores[MAX_CORES];
+	unsigned int launched_count = 0;
+	unsigned int lcore_id;
+
+	if (rte_lcore_count() < num_queues) {
+		rte_exit(EXIT_FAILURE,
+			 "Need at least %u lcores for %u client workers\n",
+			 num_queues,
+			 num_queues);
+	}
+
+	worker_ctxs = calloc(num_queues, sizeof(*worker_ctxs));
+	if (worker_ctxs == NULL) {
+		rte_exit(EXIT_FAILURE,
+			 "Cannot allocate client worker contexts for %u queues\n",
+			 num_queues);
+	}
+
+	start_cycles = rte_get_timer_cycles() + rte_get_timer_hz() / 20;
+	end_cycles = start_cycles + (uint64_t)seconds * rte_get_timer_hz();
+
+	worker_ctxs[next_queue].queue_id = next_queue;
+	worker_ctxs[next_queue].lcore_id = rte_lcore_id();
+	worker_ctxs[next_queue].start_cycles = start_cycles;
+	worker_ctxs[next_queue].end_cycles = end_cycles;
+	worker_ctxs[next_queue].initial_flow_id = next_queue;
+	used_workers++;
+	next_queue++;
+
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
+		if (next_queue >= num_queues) {
+			break;
+		}
+
+		worker_ctxs[next_queue].queue_id = next_queue;
+		worker_ctxs[next_queue].lcore_id = lcore_id;
+		worker_ctxs[next_queue].start_cycles = start_cycles;
+		worker_ctxs[next_queue].end_cycles = end_cycles;
+		worker_ctxs[next_queue].initial_flow_id = next_queue;
+		if (rte_eal_remote_launch(client_throughput_worker,
+					  &worker_ctxs[next_queue],
+					  lcore_id) != 0) {
+			rte_exit(EXIT_FAILURE,
+				 "Cannot launch client worker for queue %u on lcore %u\n",
+				 next_queue,
+				 lcore_id);
+		}
+		launched_lcores[launched_count++] = lcore_id;
+		used_workers++;
+		next_queue++;
+	}
+
+	if (used_workers < num_queues) {
+		rte_exit(EXIT_FAILURE,
+			 "Only mapped %u client workers for %u queues\n",
+			 used_workers,
+			 num_queues);
+	}
+
+	client_throughput_worker(&worker_ctxs[0]);
+
+	for (unsigned int i = 0; i < launched_count; i++) {
+		if (rte_eal_wait_lcore(launched_lcores[i]) < 0) {
+			rte_exit(EXIT_FAILURE,
+				 "Client worker on lcore %u exited with error\n",
+				 launched_lcores[i]);
+		}
+	}
+
+	for (unsigned int i = 0; i < num_queues; i++) {
+		total_reqs += worker_ctxs[i].reqs;
+		total_tx_sent += worker_ctxs[i].tx_sent;
+		total_tx_drops += worker_ctxs[i].tx_drops;
+	}
+
+	printf("DPDK Echo multi-core client ran for %d seconds\n", seconds);
+	printf("DPDK Echo multi-core client tx_sent=%" PRIu64
+	       " tx_drops=%" PRIu64 " completed=%" PRIu64 "\n",
+	       total_tx_sent,
+	       total_tx_drops,
+	       total_reqs);
+	printf("DPDK Echo multi-core client request-per-seconds: %f\n",
+	       (float)total_reqs / (float)seconds);
+	printf("DPDK Echo multi-core client throughput (Gbps): %f\n",
+	       ((float)total_reqs / (float)seconds) *
+		       (payload_len + sizeof(struct rte_ether_hdr) +
+			sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr)) * 8 /
+		       1e9);
+	free(worker_ctxs);
+	(void)port;
 }
 
 /*
@@ -191,20 +365,29 @@ static void run_client(uint8_t port)
 	rte_ether_format_addr(&mac_buf[0], 64, &static_server_eth);
 	printf("Using static server MAC addr: %s\n", &mac_buf[0]);
 
-	client_latency_test(port);
-	client_throughput_test(port);
+	if (num_queues == 1) {
+		client_latency_test(port);
+		client_throughput_test(port);
+		return;
+	}
+
+	printf("Multi-worker client mode enabled with %u queues/workers; "
+	       "latency test is skipped and throughput workers run in parallel.\n",
+	       num_queues);
+	run_client_multiworker(port);
 }
 
 static int parse_echo_args(int argc, char *argv[])
 {
 	long packet_size;
 	long flow_count;
+	long worker_count;
 	size_t header_len;
 
-	if (argc != 3 && argc != 4) {
+	if (argc != 3 && argc != 4 && argc != 5) {
         printf("argument number incorrect: %d\n", argc);
-        printf("usage: sudo ./packet_gen_client <PACKET_SIZE> <SERVER_MAC> [NUM_FLOWS]\n");
-        printf("example: sudo ./packet_gen_client 64 ec:b1:d7:85:5a:93 128\n");
+        printf("usage: sudo ./packet_gen_client <PACKET_SIZE> <SERVER_MAC> [NUM_FLOWS] [NUM_WORKERS]\n");
+        printf("example: sudo ./packet_gen_client 64 ec:b1:d7:85:5a:93 128 2\n");
         return -EINVAL;
     }
 
@@ -220,6 +403,7 @@ static int parse_echo_args(int argc, char *argv[])
 	my_ip = DEFAULT_CLIENT_IP;
 	server_ip = DEFAULT_SERVER_IP;
 	num_queues = CLIENT_NUM_QUEUES;
+	worker_count = CLIENT_NUM_QUEUES;
 
 	if (argc == 4) {
 		flow_count = strtol(argv[3], NULL, 10);
@@ -234,6 +418,15 @@ static int parse_echo_args(int argc, char *argv[])
 		num_flows = DEFAULT_NUM_FLOWS;
 	}
 
+	if (argc == 5) {
+		worker_count = strtol(argv[4], NULL, 10);
+		if (worker_count <= 0 || worker_count > MAX_CORES) {
+			printf("num_workers must be in range [1, %d]\n", MAX_CORES);
+			return -EINVAL;
+		}
+		num_queues = (unsigned int)worker_count;
+	}
+
 	/* parse static server MAC addr from XX:XX:XX:XX:XX:XX */
 	if (rte_ether_unformat_addr(argv[2], &static_server_eth) != 0) {
 		printf("invalid server MAC address: %s\n", argv[2]);
@@ -243,6 +436,7 @@ static int parse_echo_args(int argc, char *argv[])
 	       num_flows,
 	       client_port,
 	       client_port + num_flows - 1);
+	printf("Client workers/queues: %u\n", num_queues);
 	return 0;
 }
 

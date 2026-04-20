@@ -1,245 +1,154 @@
-# ECE6960 Final project
+# ECE6960 Final Project
 
-This repository currently tracks the warmup DPDK echo-server assignment and related code for the ECE6960 project.
+This repo contains a DPDK IPv4/UDP echo server and a packet generator client for latency, throughput, RSS, and multi-core scaling experiments.
 
 ## Files
-- `app/echo_server.c`: DPDK echo server implementation
-- `app/packet_gen_client.c`: DPDK packet generator for RTT and throughput measurements
-- `app/dpdk.h`: shared DPDK helper definitions used by both programs
-- `Makefile`: root-level build entry that compiles both apps
+- `app/echo_server.c`: echo server with per-worker profiling
+- `app/packet_gen_client.c`: latency test plus single-core or multi-core throughput generator
+- `app/dpdk.h`: shared DPDK config, packet format, RSS setup, and helpers
+- `analysis/plot_single_core_stage_breakdown.py`: plot one server `[profile]` sample as a stage breakdown
 
-## Hardware setup
-The following steps document the 100G hardware bring-up path used on the newer CloudLab environment. This flow assumes the target experimental port is `0000:17:00.0` and the Linux interface is `ens1f0`.
+## Prerequisites
+- DPDK must be installed and visible to `pkg-config`
+- the target NIC port must be bound to a DPDK-compatible driver such as `vfio-pci`
+- the test port selected by `dpdk_port` in `app/dpdk.h` must match your experiment NIC
 
-### 1. Confirm machine and NIC status
-
-```bash
-uname -r
-lspci | grep -i -E 'Ethernet|E810'
-ip link
-sudo /usr/local/bin/dpdk-devbind.py --status
-```
-
-Confirm that `0000:17:00.0` is the target experimental port before continuing.
-
-### 2. Install base dependencies
+Build:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  meson ninja-build pkg-config \
-  libnuma-dev libpcap-dev python3-pyelftools \
-  linux-headers-$(uname -r) \
-  ethtool pciutils git wget
-```
-
-DPDK 22.11 on Linux is built from source with Meson and Ninja. Extra optional components are enabled or disabled depending on which system dependencies are available.
-
-### 3. Install Intel official `ice` driver and DDP package
-
-Intel's `ice` driver README notes that `make install` will also install the default DDP package. During initialization, the driver looks for `intel/ice/ddp/ice.pkg`.
-
-```bash
-cd ~
-rm -rf ethernet-linux-ice
-git clone https://github.com/intel/ethernet-linux-ice.git
-cd ethernet-linux-ice/src
-
-make -j"$(nproc)"
-sudo make install
-```
-
-### 4. Reboot instead of unloading the `ice` module
-
-This ensures:
-
-- the new `ice` driver takes effect
-- the new DDP package is loaded
-- SSH is not interrupted by `modprobe -r ice`
-
-```bash
-sudo reboot
-```
-
-### 5. Verify the new driver and DDP package after reconnecting
-
-```bash
-ethtool -i ens1f0
-ls -l /lib/firmware/updates/intel/ice/ddp/
-ls -l /lib/firmware/intel/ice/ddp/
-dmesg | grep -i ice | tail -n 100
-```
-
-Expected signs:
-
-- `driver: ice`
-- `version: 2.5.4`
-- `/lib/firmware/updates/intel/ice/ddp/ice.pkg -> ice-1.3.56.0.pkg`
-- `The DDP package was successfully loaded`
-
-Intel's out-of-tree `ice` driver prefers firmware files from `/lib/firmware/updates/`.
-
-### 6. Install DPDK 22.11
-
-DPDK 22.11 uses the standard `meson setup build`, `ninja -C build`, and `ninja install` flow, with installation typically landing under `/usr/local`.
-
-```bash
-cd ~
-rm -rf dpdk
-git clone https://github.com/DPDK/dpdk.git
-cd dpdk
-git fetch --all --tags
-git switch -c dpdk-22.11-test v22.11.6
-
-meson setup build
-ninja -C build
-sudo ninja -C build install
-sudo ldconfig
-```
-
-Then confirm the installed version:
-
-```bash
-pkg-config --modversion libdpdk
-```
-
-You should see `22.11.x`.
-
-### 7. Enable VFIO no-IOMMU mode
-
-DPDK documentation notes that when IOMMU is unavailable, VFIO can still be used if `enable_unsafe_noiommu_mode=1` is enabled.
-
-```bash
-sudo modprobe vfio
-sudo modprobe vfio-pci
-echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
-cat /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
-```
-
-Expected output is `Y` or `1`.
-
-### 8. Bind the target port to `vfio-pci`
-
-First confirm the target port is still using `ice`:
-
-```bash
-sudo /usr/local/bin/dpdk-devbind.py --status
-```
-
-Then bring the interface down and bind the PCI function:
-
-```bash
-sudo ip link set ens1f0 down
-sudo /usr/local/bin/dpdk-devbind.py -b vfio-pci 0000:17:00.0
-sudo /usr/local/bin/dpdk-devbind.py --status
-```
-
-Expected result:
-
-- `0000:17:00.0` appears under `Network devices using DPDK-compatible driver`
-
-## Quick use on CloudLab
-On both nodes:
-
-```bash
-git clone git@github.com:zc579/ECE6960-User-Space-Networking-Stack-Beyond-400G.git
-cd ECE6960-User-Space-Networking-Stack-Beyond-400G
 make
 ```
 
-If `make` cannot find `libdpdk`, make sure DPDK is installed and that `pkg-config` can locate `libdpdk.pc`.
+## Packet Format
+The programs exchange fixed-format Ethernet + IPv4 + UDP echo packets.
 
-On node 0:
-
-```bash
-sudo ./echo_server -l 0,1 --
-```
-
-On node 1:
-
-```bash
-sudo ./packet_gen_client -l 0 -- 64 40:A6:B7:C3:3E:00 128
-```
-
-The applications now use IPv4/UDP echo packets with built-in addresses:
-
+Built-in addresses:
 - server IP: `10.16.1.1`
 - client IP: `10.16.1.2`
 - server UDP port: `8001`
-- client UDP source port range: `50000 ... 50000 + NUM_FLOWS - 1`
+- client UDP source ports: `50000 ... 50000 + NUM_FLOWS - 1`
 
-The server uses 2 RX/TX queues and enables RSS for IPv4/UDP traffic. The client should send multiple flows, for example `128`, so the NIC can distribute traffic across both server queues.
+Notes:
+- these IPs are application-defined packet fields; they do not need to match a Linux interface IP
+- the server enables IPv4/UDP RSS automatically when `NUM_WORKERS > 1`
+- to benefit from RSS, the client should send multiple flows, for example `NUM_FLOWS=128`
 
-## Echo server profiling
-Each server worker prints one `[profile]` line per second. The line includes `queue_id=...` and `lcore=...`, so on a dual-core run you should expect one line per queue/worker.
+## Usage
+Server:
 
-The datapath is split into:
-
-- `RX`: one `rte_eth_rx_burst` call that receives a batch
-- `Parse`: locating Ethernet, IPv4, and UDP headers for all packets in the batch
-- `Rewrite`: swapping Ethernet/IP/UDP endpoint fields for all packets in the batch
-- `Checksum`: recomputing IPv4 and UDP checksums for all packets in the batch
-- `TX`: one `rte_eth_tx_burst` call that sends the processed batch
-
-Example output:
-
-```text
-[profile] queue_id=0 lcore=0 rx_pkts=... tx_pkts=... tx_drops=... poll_count=... empty_poll_count=... nonempty_poll_count=... work_batches=... rx_mpps=... tx_mpps=... avg_burst=... total_cycles/poll=... total_cycles/nonempty_batch=... total_cycles/pkt=... ... checksum_cycles/nonempty_batch=... checksum_cycles/pkt=... tx_cycles/nonempty_batch=... tx_cycles/pkt=... other_cycles/nonempty_batch=... other_cycles/pkt=... cpu_ghz=...
+```bash
+sudo ./echo_server -l <lcore_list> -- <NUM_WORKERS>
 ```
 
-Field meanings:
+Examples:
 
-- `rx_pkts` / `tx_pkts`: packets received and echoed during the last reporting interval
-- `tx_drops`: packets that could not be transmitted and were freed
-- `poll_count`: total number of RX polling calls during the interval
-- `work_batches`: number of non-empty RX batches that were actually parsed, rewritten, and transmitted
-- `rx_mpps` / `tx_mpps`: receive/transmit rate in million packets per second
-- `avg_burst`: average number of packets in each non-empty batch
-- `rx_cycles/nonempty_batch`: average CPU cycles per RX stage for one non-empty batch
-- `parse_cycles/nonempty_batch`: average CPU cycles spent parsing one received batch
-- `rewrite_cycles/nonempty_batch`: average CPU cycles spent rewriting one received batch
-- `checksum_cycles/nonempty_batch`: average CPU cycles spent recomputing checksums for one batch
-- `tx_cycles/nonempty_batch`: average CPU cycles per burst TX call
-- `rx_cycles/pkt`: RX cost amortized per received packet
-- `parse_cycles/pkt`: parse cost amortized per received packet
-- `rewrite_cycles/pkt`: rewrite cost amortized per received packet
-- `checksum_cycles/pkt`: checksum cost amortized per received packet
-- `tx_cycles/pkt`: TX cost amortized per transmitted packet
-- `other_cycles/nonempty_batch` / `other_cycles/pkt`: derived control-path overhead not explained by RX/parse/rewrite/checksum/TX stage timers
+```bash
+sudo ./echo_server -l 0 -- 1
+sudo ./echo_server -l 0,1 -- 2
+sudo ./echo_server -l 0,1,2,3 -- 4
+```
 
-`BURST_SIZE` is defined in `app/dpdk.h`. It is the maximum number of packets that one RX burst call tries to receive. If `avg_burst` is close to 1, batching is not being used effectively; if it is closer to `BURST_SIZE`, the fixed parse/rewrite/TX cost is better amortized across packets.
+Client:
 
-For a dual-core run, total server throughput is the sum of the two worker lines. If only one queue is receiving traffic, double-check that RSS is enabled and that the client is using more than one UDP flow.
+```bash
+sudo ./packet_gen_client -l <lcore_list> -- <PACKET_SIZE> <SERVER_MAC> [NUM_FLOWS] [NUM_WORKERS]
+```
 
-## Notes
-- Source files now live under `app/`, and the shared header is `app/dpdk.h`.
-- The current `echo_server` and `packet_gen_client` implement an IPv4/UDP echo protocol and are set up for a 2-queue RSS server.
-- The experimental NIC selection still depends on the logic inside `app/dpdk.h`, so confirm that `dpdk_port` refers to the experimental interface before running on CloudLab.
+Examples:
 
-## Plotting single-core stage share
-You can save the server output and use the plotting script in `analysis/` to generate a bar chart for the stage breakdown.
+```bash
+sudo ./packet_gen_client -l 0 -- 64 <SERVER_MAC> 128 1
+sudo ./packet_gen_client -l 0,1 -- 64 <SERVER_MAC> 128 2
+sudo ./packet_gen_client -l 0,1,2,3 -- 64 <SERVER_MAC> 256 4
+```
+
+Argument behavior:
+- `NUM_WORKERS` is the number of RX/TX queues and worker lcores used by the program
+- server mode requires at least `NUM_WORKERS` lcores in the EAL `-l` list
+- client mode also requires at least `NUM_WORKERS` lcores
+- `PACKET_SIZE` is the full Ethernet frame size used by the app and must be at least `42` bytes
+- if `NUM_WORKERS == 1`, the client runs a latency test followed by a throughput test
+- if `NUM_WORKERS > 1`, the client skips latency and runs parallel throughput workers only
+
+## Quick Start
+On the server node:
+
+```bash
+make
+sudo ./echo_server -l 0,1 -- 2
+```
+
+On the client node:
+
+```bash
+make
+sudo ./packet_gen_client -l 0,1 -- 64 <SERVER_MAC> 128 2
+```
+
+What to expect:
+- the server prints one `[profile]` line per worker per second
+- the client prints either latency + throughput results for one worker, or per-worker throughput plus an aggregate total for multi-worker runs
+- if only one server queue receives traffic in a multi-core run, increase `NUM_FLOWS` and confirm RSS is supported on the NIC
+
+## Server Profiling
+Each server worker reports one `[profile]` line per second with `queue_id=...` and `lcore=...`.
+
+The measured stages are:
+- `RX`: one `rte_eth_rx_burst()` call
+- `Parse`: locating Ethernet, IPv4, and UDP headers for the whole batch
+- `Rewrite`: swapping MAC, IP, and UDP endpoint fields for the whole batch
+- `Checksum`: recomputing IPv4 and UDP checksums for the whole batch
+- `TX`: one `rte_eth_tx_burst()` call
+
+The profile line also includes explicit loop accounting:
+- `poll_count`: total RX polls
+- `empty_poll_count`: polls with `nb_rx == 0`
+- `nonempty_poll_count`: polls with `nb_rx > 0`
+- `work_batches`: processed non-empty batches
+- `total_cycles/poll`: average cycles per RX loop iteration
+- `*_cycles/nonempty_batch`: stage cost normalized by non-empty polls
+- `*_cycles/pkt`: stage cost normalized by packets
+- `empty_poll_cycles/empty_poll`: true empty-poll cost
+- `nonempty_poll_cycles/nonempty_poll`: true non-empty-poll loop cost
+- `other_cycles/nonempty_batch`: derived loop/control overhead not explained by RX, parse, rewrite, checksum, and TX
 
 Example:
-On node 0:
-```bash
-mkdir -p results/raw
-sudo ./echo_server -l 0,1 -- | tee results/raw/echo_dual_core.log
-python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo_dual_core.log
-```
-
-By default, the script selects the `[profile]` sample with the highest `rx_mpps` and writes:
 
 ```text
-results/processed/single_core_stage_breakdown.png
+[profile] queue_id=0 lcore=0 rx_pkts=... tx_pkts=... tx_drops=... poll_count=... empty_poll_count=... nonempty_poll_count=... work_batches=... rx_mpps=... tx_mpps=... avg_burst=... total_cycles/poll=... total_cycles/nonempty_batch=... total_cycles/pkt=... checksum_cycles/nonempty_batch=... checksum_cycles/pkt=... other_cycles/nonempty_batch=... other_cycles/pkt=... cpu_ghz=...
 ```
 
-You can also choose the last sample explicitly:
+For a multi-core run, total server throughput is the sum of all worker lines.
+
+## Plotting
+Save the server log and run the plotting script:
 
 ```bash
-python3 analysis/plot_single_core_stage_breakdown.py \
-  results/raw/echo_dual_core.log \
-  --mode last
+mkdir -p results/raw
+sudo ./echo_server -l 0 -- 1 | tee results/raw/echo.log
+python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo.log
 ```
 
-The current plotting script still selects one `[profile]` sample at a time, so on a dual-core log it visualizes one worker line rather than an aggregate of both queues.
+Optional flags:
+
+```bash
+python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo.log --mode last
+python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo.log --output results/processed/stage_breakdown.png --title "Single-Core Echo Breakdown"
+```
+
+Notes:
+- the script reads `[profile]` lines from the server log
+- by default it picks the sample with the highest `rx_mpps`
+- on a multi-core log it still plots one worker sample at a time, not an aggregate
+
+## Minimal Environment Checklist
+If the binaries do not run yet, verify these first:
+
+```bash
+pkg-config --modversion libdpdk
+sudo /usr/local/bin/dpdk-devbind.py --status
+```
+
+The expected state is:
+- `pkg-config` finds `libdpdk`
+- your experiment NIC appears under a DPDK-compatible driver

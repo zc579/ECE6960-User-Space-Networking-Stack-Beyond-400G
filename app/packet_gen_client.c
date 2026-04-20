@@ -6,8 +6,10 @@
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
+#include <rte_ip.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_udp.h>
 #include "dpdk.h"
 
 static void client_latency_test(uint8_t port)
@@ -15,6 +17,7 @@ static void client_latency_test(uint8_t port)
 	uint64_t start_time, end_time;
 	struct rte_mbuf *bufs[BURST_SIZE];
 	struct rte_mbuf *buf;
+	struct rte_udp_hdr *udp_hdr;
 	uint32_t nb_tx, nb_rx, i;
 	uint64_t correct_echos = 0, incorrect_echos = 0;
 	uint64_t time_received;
@@ -60,9 +63,20 @@ static void client_latency_test(uint8_t port)
 				if (!check_eth_hdr(buf))
 					goto no_match;
 
+				if (!check_ip_hdr(buf))
+					goto no_match;
+
 				eth_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr *);
 				if (!rte_is_same_ether_addr(&eth_hdr->src_addr,
 							    &static_server_eth))
+					goto no_match;
+
+				udp_hdr = rte_pktmbuf_mtod_offset(
+					buf,
+					struct rte_udp_hdr *,
+					RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr));
+				if (udp_hdr->src_port != rte_cpu_to_be_16(server_port) ||
+				    udp_hdr->dst_port != rte_cpu_to_be_16(client_port))
 					goto no_match;
 
 				/* packet matches */
@@ -163,10 +177,12 @@ static void client_throughput_test(uint8_t port) {
     float rps = (float)(reqs * rte_get_timer_hz()) / (end_time - start_time);
     printf("DPDK Echo runs %f seconds, completed %" PRIu64 " echos\n",
            (float)(end_time - start_time) / rte_get_timer_hz(), reqs);
-    printf("DPDK Echo client request-per-seconds: %f\n",
+	printf("DPDK Echo client request-per-seconds: %f\n",
            rps);
 	printf("DPDK Echo client throughput (Gbps): %f\n",
-           rps * (payload_len + sizeof(struct rte_ether_hdr)) * 8 / 1e9);
+           rps * (payload_len + sizeof(struct rte_ether_hdr) +
+                  sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr)) *
+                     8 / 1e9);
 }
 
 /*
@@ -199,13 +215,16 @@ static int parse_echo_args(int argc, char *argv[])
     }
 
 	packet_size = strtol(argv[1], NULL, 10);
-	header_len = sizeof(struct rte_ether_hdr);
+	header_len = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) +
+		     sizeof(struct rte_udp_hdr);
 	if (packet_size <= 0 || (size_t)packet_size < header_len) {
 		printf("packet size must be at least %zu bytes\n", header_len);
 		return -EINVAL;
 	}
 
 	payload_len = (size_t)packet_size - header_len;
+	my_ip = DEFAULT_CLIENT_IP;
+	server_ip = DEFAULT_SERVER_IP;
 
 	/* parse static server MAC addr from XX:XX:XX:XX:XX:XX */
 	if (rte_ether_unformat_addr(argv[2], &static_server_eth) != 0) {

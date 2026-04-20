@@ -7,8 +7,10 @@
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
+#include <rte_ip.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_udp.h>
 
 #include "dpdk.h"
 
@@ -28,6 +30,7 @@ struct echo_profile {
     uint64_t rx_cycles;
     uint64_t parse_cycles;
     uint64_t rewrite_cycles;
+    uint64_t checksum_cycles;
     uint64_t tx_cycles;
 };
 
@@ -63,7 +66,8 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
      * show a meaningful per-poll cost even when rx_pkts == 0.
      */
     uint64_t accounted_cycles = stats->rx_cycles + stats->parse_cycles +
-                                stats->rewrite_cycles + stats->tx_cycles;
+                                stats->rewrite_cycles + stats->checksum_cycles +
+                                stats->tx_cycles;
     /* Clamp at zero in case timer-read noise ever makes the summed explicit
      * stage timers slightly exceed total_loop_cycles in a short interval.
      */
@@ -96,6 +100,7 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
            " rx_cycles/nonempty_batch=%.1f rx_cycles/pkt=%.1f"
            " parse_cycles/nonempty_batch=%.1f parse_cycles/pkt=%.1f"
            " rewrite_cycles/nonempty_batch=%.1f rewrite_cycles/pkt=%.1f"
+           " checksum_cycles/nonempty_batch=%.1f checksum_cycles/pkt=%.1f"
            " tx_cycles/nonempty_batch=%.1f tx_cycles/pkt=%.1f"
            " other_cycles/nonempty_batch=%.1f other_cycles/pkt=%.1f"
            " cpu_ghz=%.3f\n",
@@ -126,6 +131,8 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
            cycles_per_packet(stats->parse_cycles, stats->rx_packets),
            cycles_per_event(stats->rewrite_cycles, stats->nonempty_poll_count),
            cycles_per_packet(stats->rewrite_cycles, stats->rx_packets),
+           cycles_per_event(stats->checksum_cycles, stats->nonempty_poll_count),
+           cycles_per_packet(stats->checksum_cycles, stats->rx_packets),
            cycles_per_event(stats->tx_cycles, stats->nonempty_poll_count),
            cycles_per_packet(stats->tx_cycles, stats->tx_packets),
            cycles_per_event(other_cycles, stats->nonempty_poll_count),
@@ -142,6 +149,8 @@ run_server(void)
     uint8_t port = dpdk_port;
     struct rte_mbuf *rx_bufs[BURST_SIZE];
     struct rte_ether_hdr *eth_hdrs[BURST_SIZE];
+    struct rte_ipv4_hdr *ipv4_hdrs[BURST_SIZE];
+    struct rte_udp_hdr *udp_hdrs[BURST_SIZE];
     struct echo_profile stats = {0};
     uint64_t hz = rte_get_timer_hz();
     uint64_t last_report = rte_get_timer_cycles();
@@ -201,6 +210,12 @@ run_server(void)
         t0 = rte_get_timer_cycles();
         for (uint16_t i = 0; i < nb_rx; i++) {
             eth_hdrs[i] = rte_pktmbuf_mtod(rx_bufs[i], struct rte_ether_hdr *);
+            ipv4_hdrs[i] = rte_pktmbuf_mtod_offset(
+                rx_bufs[i], struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+            udp_hdrs[i] = rte_pktmbuf_mtod_offset(
+                rx_bufs[i],
+                struct rte_udp_hdr *,
+                sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr));
         }
         t1 = rte_get_timer_cycles();
         stats.parse_cycles += t1 - t0;
@@ -208,15 +223,41 @@ run_server(void)
         t0 = rte_get_timer_cycles();
         for (uint16_t i = 0; i < nb_rx; i++) {
             struct rte_ether_hdr *eth_hdr = eth_hdrs[i];
+            struct rte_ipv4_hdr *ipv4_hdr = ipv4_hdrs[i];
+            struct rte_udp_hdr *udp_hdr = udp_hdrs[i];
             struct rte_ether_addr tmp_eth_addr;
+            rte_be32_t tmp_ip_addr;
+            rte_be16_t tmp_udp_port;
 
-            /* Swap Ethernet source and destination MAC addresses. */
+            /* Swap Ethernet, IPv4, and UDP endpoint fields. */
             rte_ether_addr_copy(&eth_hdr->src_addr, &tmp_eth_addr);
             rte_ether_addr_copy(&eth_hdr->dst_addr, &eth_hdr->src_addr);
             rte_ether_addr_copy(&tmp_eth_addr, &eth_hdr->dst_addr);
+
+            tmp_ip_addr = ipv4_hdr->src_addr;
+            ipv4_hdr->src_addr = ipv4_hdr->dst_addr;
+            ipv4_hdr->dst_addr = tmp_ip_addr;
+
+            tmp_udp_port = udp_hdr->src_port;
+            udp_hdr->src_port = udp_hdr->dst_port;
+            udp_hdr->dst_port = tmp_udp_port;
         }
         t1 = rte_get_timer_cycles();
         stats.rewrite_cycles += t1 - t0;
+
+        t0 = rte_get_timer_cycles();
+        for (uint16_t i = 0; i < nb_rx; i++) {
+            struct rte_ipv4_hdr *ipv4_hdr = ipv4_hdrs[i];
+            struct rte_udp_hdr *udp_hdr = udp_hdrs[i];
+
+            ipv4_hdr->hdr_checksum = 0;
+            ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
+
+            udp_hdr->dgram_cksum = 0;
+            udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
+        }
+        t1 = rte_get_timer_cycles();
+        stats.checksum_cycles += t1 - t0;
 
         t0 = rte_get_timer_cycles();
         {
@@ -265,6 +306,7 @@ parse_echo_args(int argc, char *argv[])
         return -EINVAL;
     }
 
+    my_ip = DEFAULT_SERVER_IP;
     return 0;
 }
 

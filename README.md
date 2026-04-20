@@ -153,56 +153,68 @@ If `make` cannot find `libdpdk`, make sure DPDK is installed and that `pkg-confi
 On node 0:
 
 ```bash
-sudo ./echo_server
+sudo ./echo_server -l 0,1 --
 ```
 
 On node 1:
 
 ```bash
-sudo ./packet_gen_client 64 40:A6:B7:C3:3E:00
+sudo ./packet_gen_client -l 0 -- 64 40:A6:B7:C3:3E:00 128
 ```
 
-The applications now use a custom Layer-2 echo frame and do not depend on IPv4 or UDP headers.
-The client only needs the server MAC address.
+The applications now use IPv4/UDP echo packets with built-in addresses:
+
+- server IP: `10.16.1.1`
+- client IP: `10.16.1.2`
+- server UDP port: `8001`
+- client UDP source port range: `50000 ... 50000 + NUM_FLOWS - 1`
+
+The server uses 2 RX/TX queues and enables RSS for IPv4/UDP traffic. The client should send multiple flows, for example `128`, so the NIC can distribute traffic across both server queues.
 
 ## Echo server profiling
-The echo server now prints stage-level profiling once per second. The datapath is split into:
+Each server worker prints one `[profile]` line per second. The line includes `queue_id=...` and `lcore=...`, so on a dual-core run you should expect one line per queue/worker.
+
+The datapath is split into:
 
 - `RX`: one `rte_eth_rx_burst` call that receives a batch
-- `Parse`: locating the Ethernet header for all packets in the batch
-- `Rewrite`: swapping Ethernet source/destination MAC addresses for all packets in the batch
+- `Parse`: locating Ethernet, IPv4, and UDP headers for all packets in the batch
+- `Rewrite`: swapping Ethernet/IP/UDP endpoint fields for all packets in the batch
+- `Checksum`: recomputing IPv4 and UDP checksums for all packets in the batch
 - `TX`: one `rte_eth_tx_burst` call that sends the processed batch
 
 Example output:
 
 ```text
-[profile] rx_pkts=... tx_pkts=... tx_drops=... rx_bursts=... work_batches=... rx_mpps=... tx_mpps=... avg_burst=... rx_cycles/burst=... rx_cycles/pkt=... parse_cycles/burst=... parse_cycles/pkt=... rewrite_cycles/burst=... rewrite_cycles/pkt=... tx_cycles/burst=... tx_cycles/pkt=... cpu_ghz=...
+[profile] queue_id=0 lcore=0 rx_pkts=... tx_pkts=... tx_drops=... poll_count=... empty_poll_count=... nonempty_poll_count=... work_batches=... rx_mpps=... tx_mpps=... avg_burst=... total_cycles/poll=... total_cycles/nonempty_batch=... total_cycles/pkt=... ... checksum_cycles/nonempty_batch=... checksum_cycles/pkt=... tx_cycles/nonempty_batch=... tx_cycles/pkt=... other_cycles/nonempty_batch=... other_cycles/pkt=... cpu_ghz=...
 ```
 
 Field meanings:
 
 - `rx_pkts` / `tx_pkts`: packets received and echoed during the last reporting interval
 - `tx_drops`: packets that could not be transmitted and were freed
-- `rx_bursts`: total number of RX polling calls during the interval, including empty polls
+- `poll_count`: total number of RX polling calls during the interval
 - `work_batches`: number of non-empty RX batches that were actually parsed, rewritten, and transmitted
 - `rx_mpps` / `tx_mpps`: receive/transmit rate in million packets per second
 - `avg_burst`: average number of packets in each non-empty batch
-- `rx_cycles/burst`: average CPU cycles per RX burst call
-- `parse_cycles/burst`: average CPU cycles spent parsing one received batch
-- `rewrite_cycles/burst`: average CPU cycles spent rewriting one received batch
-- `tx_cycles/burst`: average CPU cycles per burst TX call
+- `rx_cycles/nonempty_batch`: average CPU cycles per RX stage for one non-empty batch
+- `parse_cycles/nonempty_batch`: average CPU cycles spent parsing one received batch
+- `rewrite_cycles/nonempty_batch`: average CPU cycles spent rewriting one received batch
+- `checksum_cycles/nonempty_batch`: average CPU cycles spent recomputing checksums for one batch
+- `tx_cycles/nonempty_batch`: average CPU cycles per burst TX call
 - `rx_cycles/pkt`: RX cost amortized per received packet
 - `parse_cycles/pkt`: parse cost amortized per received packet
 - `rewrite_cycles/pkt`: rewrite cost amortized per received packet
+- `checksum_cycles/pkt`: checksum cost amortized per received packet
 - `tx_cycles/pkt`: TX cost amortized per transmitted packet
+- `other_cycles/nonempty_batch` / `other_cycles/pkt`: derived control-path overhead not explained by RX/parse/rewrite/checksum/TX stage timers
 
 `BURST_SIZE` is defined in `app/dpdk.h`. It is the maximum number of packets that one RX burst call tries to receive. If `avg_burst` is close to 1, batching is not being used effectively; if it is closer to `BURST_SIZE`, the fixed parse/rewrite/TX cost is better amortized across packets.
 
-The server now transmits replies with a single `rte_eth_tx_burst` per processed RX batch, so `tx_cycles/burst` and `tx_cycles/pkt` reflect burst TX rather than one-packet-at-a-time TX.
+For a dual-core run, total server throughput is the sum of the two worker lines. If only one queue is receiving traffic, double-check that RSS is enabled and that the client is using more than one UDP flow.
 
 ## Notes
 - Source files now live under `app/`, and the shared header is `app/dpdk.h`.
-- The current `echo_server` and `packet_gen_client` implement a custom L2 echo protocol with EtherType `0x88B5`.
+- The current `echo_server` and `packet_gen_client` implement an IPv4/UDP echo protocol and are set up for a 2-queue RSS server.
 - The experimental NIC selection still depends on the logic inside `app/dpdk.h`, so confirm that `dpdk_port` refers to the experimental interface before running on CloudLab.
 
 ## Plotting single-core stage share
@@ -212,8 +224,8 @@ Example:
 On node 0:
 ```bash
 mkdir -p results/raw
-sudo ./echo_server | tee results/raw/echo_single_core.log
-python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo_single_core.log
+sudo ./echo_server -l 0,1 -- | tee results/raw/echo_dual_core.log
+python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo_dual_core.log
 ```
 
 By default, the script selects the `[profile]` sample with the highest `rx_mpps` and writes:
@@ -226,6 +238,8 @@ You can also choose the last sample explicitly:
 
 ```bash
 python3 analysis/plot_single_core_stage_breakdown.py \
-  results/raw/echo_single_core.log \
+  results/raw/echo_dual_core.log \
   --mode last
 ```
+
+The current plotting script still selects one `[profile]` sample at a time, so on a dual-core log it visualizes one worker line rather than an aggregate of both queues.

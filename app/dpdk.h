@@ -23,6 +23,9 @@
 
 #define FULL_MASK 0xFFFFFFFF
 #define EMPTY_MASK 0x0
+#define SERVER_NUM_QUEUES 2
+#define CLIENT_NUM_QUEUES 1
+#define DEFAULT_NUM_FLOWS 128
 #define MAKE_IP_ADDR(a, b, c, d) \
 	(((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | \
 	 ((uint32_t)(c) << 8) | (uint32_t)(d))
@@ -37,7 +40,8 @@ static int seconds = 5;
 size_t payload_len = 22; /* total packet size of 64 bytes */
 static unsigned int client_port = 50000;
 static unsigned int server_port = 8001;
-static unsigned int num_queues = 1;
+static unsigned int num_queues = CLIENT_NUM_QUEUES;
+static unsigned int num_flows = DEFAULT_NUM_FLOWS;
 
 
 /* offload checksum calculations */
@@ -92,6 +96,26 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool, unsigned int n_queues)
     retval = rte_eth_dev_info_get(port, &dev_info);
     if (retval != 0)
         return retval;
+
+    if (n_queues > 1) {
+        uint64_t rss_hf = RTE_ETH_RSS_NONFRAG_IPV4_UDP;
+
+        rss_hf &= dev_info.flow_type_rss_offloads;
+        if (rss_hf == 0) {
+            rte_exit(EXIT_FAILURE,
+                     "RSS for IPv4/UDP is not supported on port %u\n",
+                     port);
+        }
+
+        port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
+        port_conf.rx_adv_conf.rss_conf.rss_hf = rss_hf;
+        printf("Port %u RSS enabled: rss_hf=0x%" PRIx64
+               " reta_size=%u hash_key_size=%u\n",
+               (unsigned)port,
+               rss_hf,
+               dev_info.reta_size,
+               dev_info.hash_key_size);
+    }
 
     retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
     if (retval != 0)
@@ -174,7 +198,28 @@ static bool check_ip_hdr(struct rte_mbuf *buf)
 
 struct rte_ether_addr static_server_eth;
 
-static void craft_packet(struct rte_mbuf *buf)
+static inline uint16_t
+flow_src_port(uint32_t flow_id)
+{
+	return (uint16_t)(client_port + (flow_id % num_flows));
+}
+
+static inline void
+set_packet_flow(struct rte_mbuf *buf, uint32_t flow_id)
+{
+	struct rte_ipv4_hdr *ipv4_hdr;
+	struct rte_udp_hdr *udp_hdr;
+
+	ipv4_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_ipv4_hdr *,
+			RTE_ETHER_HDR_LEN);
+	udp_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_udp_hdr *,
+			RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr));
+	udp_hdr->src_port = rte_cpu_to_be_16(flow_src_port(flow_id));
+	udp_hdr->dgram_cksum = 0;
+	udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
+}
+
+static void craft_packet(struct rte_mbuf *buf, uint32_t flow_id)
 {
 	char *buf_ptr;
 	struct rte_ether_hdr *eth_hdr;
@@ -217,7 +262,7 @@ static void craft_packet(struct rte_mbuf *buf)
 	buf->l3_len = sizeof(struct rte_ipv4_hdr);
 	buf->ol_flags = 0;
 	ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
-	udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
+	set_packet_flow(buf, flow_id);
 }
 
 /*

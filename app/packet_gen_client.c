@@ -21,6 +21,7 @@ static void client_latency_test(uint8_t port)
 	uint32_t nb_tx, nb_rx, i;
 	uint64_t correct_echos = 0, incorrect_echos = 0;
 	uint64_t time_received;
+	uint16_t expected_client_port;
 	printf("\nDPDK Echo latency test start now!\n");
 	/* Verify that we have enough space for all the datapoints, assuming
 	   an RTT of at least 4 us */
@@ -36,7 +37,8 @@ static void client_latency_test(uint8_t port)
 		if (buf == NULL)
 			printf("error allocating tx mbuf\n");
 
-		craft_packet(buf);
+		craft_packet(buf, correct_echos);
+		expected_client_port = rte_cpu_to_be_16(flow_src_port(correct_echos));
 		
 		/* send packet */
 		snd_times[correct_echos] = rte_get_timer_cycles();
@@ -76,7 +78,7 @@ static void client_latency_test(uint8_t port)
 					struct rte_udp_hdr *,
 					RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr));
 				if (udp_hdr->src_port != rte_cpu_to_be_16(server_port) ||
-				    udp_hdr->dst_port != rte_cpu_to_be_16(client_port))
+				    udp_hdr->dst_port != expected_client_port)
 					goto no_match;
 
 				/* packet matches */
@@ -117,31 +119,24 @@ static void client_throughput_test(uint8_t port) {
     uint64_t start_time, end_time;
     struct rte_mbuf *bufs[BURST_SIZE];
     struct rte_mbuf *pkts[BURST_SIZE];
-    struct rte_mbuf *template_buf = rte_pktmbuf_alloc(tx_mbuf_pool);
     uint32_t nb_tx, nb_rx, i, created_pkts;
     uint64_t reqs = 0;
+    uint64_t next_flow = 0;
 
 	printf("\nDPDK Echo throughput test start now!\n");
-    // Check if the template packet was allocated successfully
-    if (unlikely(template_buf == NULL)) {
-        rte_exit(EXIT_FAILURE, "Failed to allocate template mbuf\n");
-    }
-
-    craft_packet(template_buf);
-
     /* run for specified amount of time */
     start_time = rte_get_timer_cycles();
     while (rte_get_timer_cycles() <
            start_time + seconds * rte_get_timer_hz()) {
 
-        /* 1. Prepare a burst of packets by cloning the template. */
+        /* 1. Prepare a burst of packets, varying UDP source ports per flow. */
         created_pkts = 0;
         for (i = 0; i < BURST_SIZE; i++) {
-            pkts[i] = rte_pktmbuf_clone(template_buf, tx_mbuf_pool);
-            // Stop creating if the memory pool runs out of buffers
+            pkts[i] = rte_pktmbuf_alloc(tx_mbuf_pool);
             if (unlikely(pkts[i] == NULL)) {
                 break;
             }
+            craft_packet(pkts[i], next_flow++);
             created_pkts++;
         }
         
@@ -172,8 +167,6 @@ static void client_throughput_test(uint8_t port) {
     }
     end_time = rte_get_timer_cycles();
 
-    /* 6. Clean up the original template packet. */
-    rte_pktmbuf_free(template_buf);
     float rps = (float)(reqs * rte_get_timer_hz()) / (end_time - start_time);
     printf("DPDK Echo runs %f seconds, completed %" PRIu64 " echos\n",
            (float)(end_time - start_time) / rte_get_timer_hz(), reqs);
@@ -205,12 +198,13 @@ static void run_client(uint8_t port)
 static int parse_echo_args(int argc, char *argv[])
 {
 	long packet_size;
+	long flow_count;
 	size_t header_len;
 
-	if (argc != 3) {
+	if (argc != 3 && argc != 4) {
         printf("argument number incorrect: %d\n", argc);
-        printf("usage: sudo ./packet_gen_client <PACKET_SIZE> <SERVER_MAC>\n");
-        printf("example: sudo ./packet_gen_client 64 ec:b1:d7:85:5a:93\n");
+        printf("usage: sudo ./packet_gen_client <PACKET_SIZE> <SERVER_MAC> [NUM_FLOWS]\n");
+        printf("example: sudo ./packet_gen_client 64 ec:b1:d7:85:5a:93 128\n");
         return -EINVAL;
     }
 
@@ -225,12 +219,30 @@ static int parse_echo_args(int argc, char *argv[])
 	payload_len = (size_t)packet_size - header_len;
 	my_ip = DEFAULT_CLIENT_IP;
 	server_ip = DEFAULT_SERVER_IP;
+	num_queues = CLIENT_NUM_QUEUES;
+
+	if (argc == 4) {
+		flow_count = strtol(argv[3], NULL, 10);
+		if (flow_count <= 0 ||
+		    flow_count > (long)(UINT16_MAX - client_port)) {
+			printf("num_flows must be in range [1, %u]\n",
+			       (unsigned)(UINT16_MAX - client_port));
+			return -EINVAL;
+		}
+		num_flows = (unsigned int)flow_count;
+	} else {
+		num_flows = DEFAULT_NUM_FLOWS;
+	}
 
 	/* parse static server MAC addr from XX:XX:XX:XX:XX:XX */
 	if (rte_ether_unformat_addr(argv[2], &static_server_eth) != 0) {
 		printf("invalid server MAC address: %s\n", argv[2]);
 		return -EINVAL;
 	}
+	printf("Client flows: %u (UDP src ports %u-%u)\n",
+	       num_flows,
+	       client_port,
+	       client_port + num_flows - 1);
 	return 0;
 }
 

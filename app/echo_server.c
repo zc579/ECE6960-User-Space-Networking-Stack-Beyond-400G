@@ -16,6 +16,11 @@
 
 #define REPORT_INTERVAL_SEC 1
 
+struct worker_ctx {
+    uint8_t queue_id;
+    unsigned int lcore_id;
+};
+
 struct echo_profile {
     uint64_t poll_count;
     uint64_t empty_poll_count;
@@ -55,7 +60,9 @@ cycles_per_event(uint64_t cycles, uint64_t count)
 }
 
 static void
-print_profile(const struct echo_profile *stats, uint64_t hz)
+print_profile(const struct echo_profile *stats,
+              uint64_t hz,
+              const struct worker_ctx *ctx)
 {
     /* Non-empty-batch-normalized stage metrics use non-empty polls as the
      * useful-batch denominator. This keeps avg_burst and
@@ -82,7 +89,8 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
     double empty_poll_ratio = cycles_per_event(stats->empty_poll_count,
                                                stats->poll_count);
 
-    printf("[profile] rx_pkts=%" PRIu64 " tx_pkts=%" PRIu64
+    printf("[profile] queue_id=%u lcore=%u"
+           " rx_pkts=%" PRIu64 " tx_pkts=%" PRIu64
            " tx_drops=%" PRIu64
            " poll_count=%" PRIu64
            " empty_poll_count=%" PRIu64
@@ -104,6 +112,8 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
            " tx_cycles/nonempty_batch=%.1f tx_cycles/pkt=%.1f"
            " other_cycles/nonempty_batch=%.1f other_cycles/pkt=%.1f"
            " cpu_ghz=%.3f\n",
+           ctx->queue_id,
+           ctx->lcore_id,
            stats->rx_packets,
            stats->tx_packets,
            stats->tx_drops,
@@ -141,12 +151,14 @@ print_profile(const struct echo_profile *stats, uint64_t hz)
 }
 
 /*
- * Run an echo server.
+ * Run one symmetric echo worker pinned to a specific RX/TX queue.
  */
 static int
-run_server(void)
+run_server_worker(void *arg)
 {
+    const struct worker_ctx *ctx = arg;
     uint8_t port = dpdk_port;
+    uint16_t queue_id = ctx->queue_id;
     struct rte_mbuf *rx_bufs[BURST_SIZE];
     struct rte_ether_hdr *eth_hdrs[BURST_SIZE];
     struct rte_ipv4_hdr *ipv4_hdrs[BURST_SIZE];
@@ -156,8 +168,8 @@ run_server(void)
     uint64_t last_report = rte_get_timer_cycles();
     uint64_t report_cycles = hz * REPORT_INTERVAL_SEC;
 
-    printf("\nCore %u running in server mode. [Ctrl+C to quit]\n",
-           rte_lcore_id());
+    printf("\nCore %u running in server mode on queue %u. [Ctrl+C to quit]\n",
+           rte_lcore_id(), queue_id);
 
     /* Run until the application is quit or killed. */
     for (;;) {
@@ -178,7 +190,7 @@ run_server(void)
 
         /* Receive packets. */
         t0 = rte_get_timer_cycles();
-        nb_rx = rte_eth_rx_burst(port, 0, rx_bufs, BURST_SIZE);
+        nb_rx = rte_eth_rx_burst(port, queue_id, rx_bufs, BURST_SIZE);
         t1 = rte_get_timer_cycles();
 
         stats.poll_count++;
@@ -196,7 +208,7 @@ run_server(void)
             stats.empty_poll_cycles += loop_cycles;
 
             if (loop_end - last_report >= report_cycles) {
-                print_profile(&stats, hz);
+                print_profile(&stats, hz, ctx);
                 memset(&stats, 0, sizeof(stats));
                 last_report = loop_end;
             }
@@ -261,7 +273,7 @@ run_server(void)
 
         t0 = rte_get_timer_cycles();
         {
-            uint16_t nb_tx = rte_eth_tx_burst(port, 0, rx_bufs, nb_rx);
+            uint16_t nb_tx = rte_eth_tx_burst(port, queue_id, rx_bufs, nb_rx);
 
             t1 = rte_get_timer_cycles();
             stats.tx_cycles += t1 - t0;
@@ -286,7 +298,7 @@ run_server(void)
         stats.nonempty_poll_cycles += loop_cycles;
 
         if (loop_end - last_report >= report_cycles) {
-            print_profile(&stats, hz);
+            print_profile(&stats, hz, ctx);
             memset(&stats, 0, sizeof(stats));
             last_report = loop_end;
         }
@@ -306,6 +318,7 @@ parse_echo_args(int argc, char *argv[])
         return -EINVAL;
     }
 
+    num_queues = SERVER_NUM_QUEUES;
     my_ip = DEFAULT_SERVER_IP;
     return 0;
 }
@@ -318,6 +331,10 @@ main(int argc, char *argv[])
 {
     int args_parsed;
     int res;
+    struct worker_ctx worker_ctxs[SERVER_NUM_QUEUES];
+    unsigned int used_workers = 0;
+    unsigned int next_queue = 0;
+    unsigned int lcore_id;
 
     /* Initialize DPDK. */
     args_parsed = dpdk_init(argc, argv);
@@ -336,6 +353,43 @@ main(int argc, char *argv[])
         rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu8 "\n", dpdk_port);
     }
 
-    run_server();
-    return 0;
+    if (rte_lcore_count() < num_queues) {
+        rte_exit(EXIT_FAILURE,
+                 "Need at least %u lcores for %u queue workers\n",
+                 num_queues,
+                 num_queues);
+    }
+
+    worker_ctxs[next_queue].queue_id = next_queue;
+    worker_ctxs[next_queue].lcore_id = rte_lcore_id();
+    used_workers++;
+    next_queue++;
+
+    RTE_LCORE_FOREACH_WORKER(lcore_id) {
+        if (next_queue >= num_queues) {
+            break;
+        }
+
+        worker_ctxs[next_queue].queue_id = next_queue;
+        worker_ctxs[next_queue].lcore_id = lcore_id;
+        if (rte_eal_remote_launch(run_server_worker,
+                                  &worker_ctxs[next_queue],
+                                  lcore_id) != 0) {
+            rte_exit(EXIT_FAILURE,
+                     "Cannot launch worker for queue %u on lcore %u\n",
+                     next_queue,
+                     lcore_id);
+        }
+        used_workers++;
+        next_queue++;
+    }
+
+    if (used_workers < num_queues) {
+        rte_exit(EXIT_FAILURE,
+                 "Only mapped %u workers for %u queues\n",
+                 used_workers,
+                 num_queues);
+    }
+
+    return run_server_worker(&worker_ctxs[0]);
 }

@@ -6,27 +6,34 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-PROFILE_PATTERN = re.compile(
-    r"\[profile\].*?"
-    r"rx_cycles/pkt=(?P<rx>[0-9.]+)\s+"
-    r"parse_cycles/pkt=(?P<parse>[0-9.]+)\s+"
-    r"rewrite_cycles/pkt=(?P<rewrite>[0-9.]+)\s+"
-    r"checksum_cycles/pkt=(?P<checksum>[0-9.]+)\s+"
-    r"tx_cycles/pkt=(?P<tx>[0-9.]+)"
-)
+PROFILE_LINE_PATTERN = re.compile(r"\[profile\]")
+
+
+def extract_metric(line: str, name: str):
+    match = re.search(rf"{re.escape(name)}=([0-9.]+)", line)
+    if not match:
+        return None
+    return float(match.group(1))
 
 
 def parse_profile_line(line: str):
-    match = PROFILE_PATTERN.search(line)
-    if not match:
+    if not PROFILE_LINE_PATTERN.search(line):
         return None
-    return {
-        "RX": float(match.group("rx")),
-        "Parse": float(match.group("parse")),
-        "Rewrite": float(match.group("rewrite")),
-        "Checksum": float(match.group("checksum")),
-        "TX": float(match.group("tx")),
+
+    required = {
+        "RX": extract_metric(line, "rx_cycles/pkt"),
+        "Parse": extract_metric(line, "parse_cycles/pkt"),
+        "Rewrite": extract_metric(line, "rewrite_cycles/pkt"),
+        "TX": extract_metric(line, "tx_cycles/pkt"),
     }
+    if any(value is None for value in required.values()):
+        return None
+
+    profile = required
+    checksum = extract_metric(line, "checksum_cycles/pkt")
+    if checksum is not None:
+        profile["Checksum"] = checksum
+    return profile
 
 
 def choose_profile(lines, mode: str):
@@ -61,7 +68,14 @@ def plot_breakdown(profile, output: Path, title: str):
     total = sum(values)
     percentages = [v / total * 100.0 if total else 0.0 for v in values]
 
-    colors = ["#355C7D", "#6C8EBF", "#99B898", "#E9C46A", "#E76F51"]
+    palette = {
+        "RX": "#355C7D",
+        "Parse": "#6C8EBF",
+        "Rewrite": "#99B898",
+        "Checksum": "#E9C46A",
+        "TX": "#E76F51",
+    }
+    colors = [palette[label] for label in labels]
 
     fig, ax = plt.subplots(figsize=(9, 5))
     bars = ax.bar(labels, percentages, color=colors, edgecolor="black", linewidth=0.8)

@@ -168,32 +168,37 @@ The client only needs the server MAC address.
 ## Echo server profiling
 The echo server now prints stage-level profiling once per second. The datapath is split into:
 
-- `RX`: receiving packets with `rte_eth_rx_burst`
-- `Parse`: locating the Ethernet header inside each mbuf
-- `Rewrite`: swapping Ethernet source/destination MAC addresses
-- `TX`: sending the packet back with `rte_eth_tx_burst`
+- `RX`: one `rte_eth_rx_burst` call that receives a batch
+- `Parse`: locating the Ethernet header for all packets in the batch
+- `Rewrite`: swapping Ethernet source/destination MAC addresses for all packets in the batch
+- `TX`: one `rte_eth_tx_burst` call that sends the processed batch
 
 Example output:
 
 ```text
-[profile] rx_pkts=... tx_pkts=... tx_drops=... rx_mpps=... tx_mpps=... avg_burst=... rx_cycles/burst=... rx_cycles/pkt=... parse_cycles/pkt=... rewrite_cycles/pkt=... tx_cycles/pkt=... cpu_ghz=...
+[profile] rx_pkts=... tx_pkts=... tx_drops=... rx_bursts=... work_batches=... rx_mpps=... tx_mpps=... avg_burst=... rx_cycles/burst=... rx_cycles/pkt=... parse_cycles/burst=... parse_cycles/pkt=... rewrite_cycles/burst=... rewrite_cycles/pkt=... tx_cycles/burst=... tx_cycles/pkt=... cpu_ghz=...
 ```
 
 Field meanings:
 
 - `rx_pkts` / `tx_pkts`: packets received and echoed during the last reporting interval
 - `tx_drops`: packets that could not be transmitted and were freed
+- `rx_bursts`: total number of RX polling calls during the interval, including empty polls
+- `work_batches`: number of non-empty RX batches that were actually parsed, rewritten, and transmitted
 - `rx_mpps` / `tx_mpps`: receive/transmit rate in million packets per second
-- `avg_burst`: average number of packets returned by each `rte_eth_rx_burst` call
+- `avg_burst`: average number of packets in each non-empty batch
 - `rx_cycles/burst`: average CPU cycles per RX burst call
+- `parse_cycles/burst`: average CPU cycles spent parsing one received batch
+- `rewrite_cycles/burst`: average CPU cycles spent rewriting one received batch
+- `tx_cycles/burst`: average CPU cycles per burst TX call
 - `rx_cycles/pkt`: RX cost amortized per received packet
-- `parse_cycles/pkt`: per-packet Ethernet header parsing cost
-- `rewrite_cycles/pkt`: per-packet MAC swap cost
-- `tx_cycles/pkt`: per-packet TX cost
+- `parse_cycles/pkt`: parse cost amortized per received packet
+- `rewrite_cycles/pkt`: rewrite cost amortized per received packet
+- `tx_cycles/pkt`: TX cost amortized per transmitted packet
 
-`BURST_SIZE` is defined in `app/dpdk.h`. It is the maximum number of packets that one RX burst call tries to receive. If `avg_burst` is close to 1, batching is not being used effectively; if it is closer to `BURST_SIZE`, the fixed RX cost is better amortized across packets.
+`BURST_SIZE` is defined in `app/dpdk.h`. It is the maximum number of packets that one RX burst call tries to receive. If `avg_burst` is close to 1, batching is not being used effectively; if it is closer to `BURST_SIZE`, the fixed parse/rewrite/TX cost is better amortized across packets.
 
-Use these numbers to identify the first bottleneck. For example, high `tx_cycles/pkt` suggests the current per-packet TX path should be optimized with batched transmit.
+The server now transmits replies with a single `rte_eth_tx_burst` per processed RX batch, so `tx_cycles/burst` and `tx_cycles/pkt` reflect burst TX rather than one-packet-at-a-time TX.
 
 ## Notes
 - Source files now live under `app/`, and the shared header is `app/dpdk.h`.

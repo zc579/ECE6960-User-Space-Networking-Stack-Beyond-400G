@@ -1,0 +1,6 @@
+cores,total_rx_mpps,total_rx_pkts,total_tx_pkts,total_tx_drops,total_cycles/pkt,RX,Parse,Rewrite,Checksum,TX,Other,queues_seen,log_path
+1,23.983,23983228,23983228,0,85.300,20.900,1.700,10.500,30.100,8.900,13.200,0,results/raw/scaling/server_1c.log
+2,45.379,45379200,45379200,0,90.999,23.551,1.950,10.400,30.500,10.399,14.200,1|0,results/raw/scaling/server_2c.log
+4,91.635,91634938,91634937,1,90.398,18.800,2.075,10.525,30.800,10.598,17.600,1|2|3|0,results/raw/scaling/server_4c.log
+6,112.890,112890992,112890792,200,109.954,22.452,3.999,17.471,33.124,10.836,22.073,1|2|3|4|5|0,results/raw/scaling/server_6c.log
+8,110.465,110465104,110464685,419,149.700,32.837,11.012,29.001,42.450,10.812,23.574,1|2|3|4|5|6|7|0,results/raw/scaling/server_8c.log

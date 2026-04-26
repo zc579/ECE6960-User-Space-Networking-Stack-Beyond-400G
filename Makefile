@@ -19,7 +19,7 @@ CFLAGS += -DALLOW_EXPERIMENTAL_API -lm -lstdc++
 
 # dpdk_echo: $(SRCS) Makefile $(PC_FILE)
 # 	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
-all: packet_gen_client echo_server
+all: packet_gen_client echo_server echo_server_before_checksum_offload echo_server_checksum_offload
 
 packet_gen_client: $(APP_DIR)/packet_gen_client.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
 	$(CC) $(CFLAGS) $(APP_DIR)/packet_gen_client.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
@@ -27,5 +27,11 @@ packet_gen_client: $(APP_DIR)/packet_gen_client.c $(APP_DIR)/dpdk.h Makefile $(P
 echo_server: $(APP_DIR)/echo_server.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
 	$(CC) $(CFLAGS) $(APP_DIR)/echo_server.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
 
+echo_server_before_checksum_offload: $(APP_DIR)/echo_server_before_checksum_offload.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
+	$(CC) $(CFLAGS) $(APP_DIR)/echo_server_before_checksum_offload.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
+
+echo_server_checksum_offload: $(APP_DIR)/echo_server_checksum_offload.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
+	$(CC) $(CFLAGS) $(APP_DIR)/echo_server_checksum_offload.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
+
 clean:
-	rm packet_gen_client echo_server
+	rm -f packet_gen_client echo_server echo_server_before_checksum_offload echo_server_checksum_offload

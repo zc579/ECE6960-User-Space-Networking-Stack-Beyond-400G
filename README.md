@@ -59,7 +59,7 @@ Examples:
 ```bash
 sudo ./packet_gen_client -l 0 -- 64 <SERVER_MAC> 128 1
 sudo ./packet_gen_client -l 0,1 -- 64 <SERVER_MAC> 128 2
-sudo ./packet_gen_client -l 0,1,2,3 -- 64 <SERVER_MAC> 256 4
+sudo ./packet_gen_client -l 0,1,2,3 -- 64 <SERVER_MAC> 128 4
 ```
 
 Argument behavior:
@@ -82,7 +82,7 @@ On the client node:
 
 ```bash
 make
-sudo ./packet_gen_client -l 0,1 -- 64 <SERVER_MAC> 128 2
+sudo ./packet_gen_client -l 0,1 -- 64 30:3e:a7:1e:e1:20 128 2
 ```
 
 What to expect:

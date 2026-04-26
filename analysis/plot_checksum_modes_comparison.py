@@ -3,6 +3,7 @@ import argparse
 import csv
 import os
 import re
+import statistics
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path("/tmp/matplotlib-cache")))
@@ -102,11 +103,115 @@ def weighted_average(samples, field: str, weight_field: str = "rx_pkts"):
     return sum(sample[field] * sample[weight_field] for sample in samples) / total_weight
 
 
-def summarize_log(mode: str, log_path: Path):
+def summarize_round(mode: str, log_path: Path, cores: int, round_samples):
+    rx_pkts = sum(sample["rx_pkts"] for sample in round_samples)
+    summary = {
+        "mode": mode,
+        "cores": cores,
+        "rx_mpps": sum(sample["rx_mpps"] for sample in round_samples),
+        "tx_mpps": sum(sample["tx_mpps"] for sample in round_samples),
+        "rx_pkts": rx_pkts,
+        "tx_pkts": sum(sample["tx_pkts"] for sample in round_samples),
+        "tx_drops": sum(sample["tx_drops"] for sample in round_samples),
+        "total_cycles_per_pkt": weighted_average(round_samples, "total_cycles_per_pkt"),
+        "queues_seen": "|".join(str(int(sample["queue_id"])) for sample in round_samples),
+        "sample_lines": "|".join(str(sample["line_no"]) for sample in round_samples),
+        "selection_rounds": 1,
+        "selection_drop_pct": 0.0,
+        "log_path": str(log_path),
+    }
+    summary["selection_drop_pct"] = (
+        summary["tx_drops"] / rx_pkts * 100.0 if rx_pkts else 0.0
+    )
+    for csv_name, _profile_name, _label in STAGES:
+        summary[csv_name] = weighted_average(round_samples, csv_name)
+
+    return summary
+
+
+def median_summaries(mode: str, log_path: Path, cores: int, round_summaries):
+    summary = {
+        "mode": mode,
+        "cores": cores,
+        "queues_seen": ";".join(item["queues_seen"] for item in round_summaries),
+        "sample_lines": ";".join(item["sample_lines"] for item in round_summaries),
+        "selection_rounds": len(round_summaries),
+        "log_path": str(log_path),
+    }
+
+    numeric_fields = [
+        "rx_mpps",
+        "tx_mpps",
+        "rx_pkts",
+        "tx_pkts",
+        "tx_drops",
+        "total_cycles_per_pkt",
+        "selection_drop_pct",
+    ]
+    numeric_fields += [csv_name for csv_name, _profile_name, _label in STAGES]
+    for field in numeric_fields:
+        summary[field] = statistics.median(item[field] for item in round_summaries)
+
+    return summary
+
+
+def choose_round_summary(mode: str,
+                         log_path: Path,
+                         cores: int,
+                         loaded_rounds,
+                         selection: str,
+                         top_n: int,
+                         max_drop_pct: float,
+                         min_rx_ratio: float):
+    round_summaries = [
+        summarize_round(mode, log_path, cores, round_samples)
+        for round_samples in loaded_rounds
+    ]
+
+    if selection == "peak":
+        return max(
+            round_summaries,
+            key=lambda item: (item["rx_pkts"], item["rx_mpps"]),
+        )
+
+    peak_rx_mpps = max(item["rx_mpps"] for item in round_summaries)
+    high_load = [
+        item for item in round_summaries
+        if item["rx_mpps"] >= peak_rx_mpps * min_rx_ratio
+    ]
+    if not high_load:
+        high_load = round_summaries
+
+    eligible = [
+        item for item in high_load
+        if item["selection_drop_pct"] <= max_drop_pct
+    ]
+    if not eligible:
+        eligible = sorted(
+            high_load,
+            key=lambda item: (item["selection_drop_pct"], -item["rx_mpps"]),
+        )[:max(top_n, 1)]
+    else:
+        eligible = sorted(
+            eligible,
+            key=lambda item: item["rx_mpps"],
+            reverse=True,
+        )[:max(top_n, 1)]
+
+    return median_summaries(mode, log_path, cores, eligible)
+
+
+def summarize_log(mode: str,
+                  log_path: Path,
+                  selection: str,
+                  top_n: int,
+                  max_drop_pct: float,
+                  min_rx_ratio: float):
     samples = []
-    for line in log_path.read_text().splitlines():
+    for line_no, line in enumerate(log_path.read_text().splitlines(), 1):
         sample = parse_profile_line(line)
         if sample:
+            sample["line_no"] = line_no
             samples.append(sample)
 
     if not samples:
@@ -121,30 +226,16 @@ def summarize_log(mode: str, log_path: Path):
     if not loaded_rounds:
         raise ValueError(f"No loaded complete profile rounds found in {log_path}")
 
-    best_round = max(
+    return choose_round_summary(
+        mode,
+        log_path,
+        cores,
         loaded_rounds,
-        key=lambda round_samples: (
-            sum(sample["rx_pkts"] for sample in round_samples),
-            sum(sample["rx_mpps"] for sample in round_samples),
-        ),
+        selection,
+        top_n,
+        max_drop_pct,
+        min_rx_ratio,
     )
-
-    summary = {
-        "mode": mode,
-        "cores": cores,
-        "rx_mpps": sum(sample["rx_mpps"] for sample in best_round),
-        "tx_mpps": sum(sample["tx_mpps"] for sample in best_round),
-        "rx_pkts": sum(sample["rx_pkts"] for sample in best_round),
-        "tx_pkts": sum(sample["tx_pkts"] for sample in best_round),
-        "tx_drops": sum(sample["tx_drops"] for sample in best_round),
-        "total_cycles_per_pkt": weighted_average(best_round, "total_cycles_per_pkt"),
-        "queues_seen": "|".join(str(int(sample["queue_id"])) for sample in best_round),
-        "log_path": str(log_path),
-    }
-    for csv_name, _profile_name, _label in STAGES:
-        summary[csv_name] = weighted_average(best_round, csv_name)
-
-    return summary
 
 
 def find_logs(raw_root: Path, modes):
@@ -167,6 +258,8 @@ def write_csv(summaries, output_path: Path):
         "rx_pkts",
         "tx_pkts",
         "tx_drops",
+        "selection_drop_pct",
+        "selection_rounds",
         "total_cycles_per_pkt",
         "rx_cycles_per_pkt",
         "parse_cycles_per_pkt",
@@ -175,6 +268,7 @@ def write_csv(summaries, output_path: Path):
         "tx_cycles_per_pkt",
         "other_cycles_per_pkt",
         "queues_seen",
+        "sample_lines",
         "log_path",
     ]
 
@@ -286,10 +380,52 @@ def main():
         default="Checksum Modes Stage Cycles",
         help="Plot title.",
     )
+    parser.add_argument(
+        "--selection",
+        choices=["stable-median", "peak"],
+        default="stable-median",
+        help=(
+            "stable-median selects low-drop high-throughput rounds and reports "
+            "their median; peak selects the highest-throughput complete queue "
+            "round for debugging."
+        ),
+    )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=3,
+        help="Number of top stable rounds to include for --selection=stable-median.",
+    )
+    parser.add_argument(
+        "--max-drop-pct",
+        type=float,
+        default=0.001,
+        help=(
+            "Maximum TX drop percentage for a stable round. If no rounds pass, "
+            "the lowest-drop rounds are used instead."
+        ),
+    )
+    parser.add_argument(
+        "--min-rx-ratio",
+        type=float,
+        default=0.8,
+        help=(
+            "For --selection=stable-median, only consider rounds with rx_mpps "
+            "at least this fraction of the mode/core peak before applying the "
+            "drop filter."
+        ),
+    )
     args = parser.parse_args()
 
     summaries = [
-        summarize_log(mode, path)
+        summarize_log(
+            mode,
+            path,
+            args.selection,
+            args.top_n,
+            args.max_drop_pct,
+            args.min_rx_ratio,
+        )
         for mode, path in find_logs(args.raw_root, args.modes)
     ]
     write_csv(summaries, args.summary_csv)

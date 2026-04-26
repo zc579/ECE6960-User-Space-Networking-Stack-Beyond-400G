@@ -11,12 +11,18 @@
 #include <rte_mbuf.h>
 #include <rte_udp.h>
 
-#define RX_RING_SIZE 128
-#define TX_RING_SIZE 128
+#ifndef RX_RING_SIZE
+#define RX_RING_SIZE 512
+#endif
+#ifndef TX_RING_SIZE
+#define TX_RING_SIZE 512
+#endif
 
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
-#define BURST_SIZE 32
+#ifndef BURST_SIZE
+#define BURST_SIZE 64
+#endif
 #define MAX_CORES 64
 #define UDP_MAX_PAYLOAD 1472
 #define MAX_SAMPLES (10*1000*1000)

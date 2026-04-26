@@ -1,0 +1,16 @@
+mode,cores,rx_mpps,tx_mpps,rx_pkts,tx_pkts,tx_drops,total_cycles_per_pkt,rx_cycles_per_pkt,parse_cycles_per_pkt,rewrite_cycles_per_pkt,checksum_cycles_per_pkt,tx_cycles_per_pkt,other_cycles_per_pkt,queues_seen,log_path
+offload,1,25.334,25.334,25334024,25334024,0,79.600,24.200,1.700,9.300,14.000,11.000,19.300,0,results/raw/checksum_modes/offload/server_1c.log
+preserve,1,26.221,26.221,26220952,26220884,68,73.800,29.300,1.700,9.800,1.700,8.500,22.800,0,results/raw/checksum_modes/preserve/server_1c.log
+software,1,24.042,24.042,24041764,24041764,0,85.100,21.100,1.700,10.100,30.000,8.900,13.300,0,results/raw/checksum_modes/software/server_1c.log
+offload,2,46.874,46.874,46873692,46873691,1,87.699,26.799,2.150,10.400,13.351,12.849,22.201,1|0,results/raw/checksum_modes/offload/server_2c.log
+preserve,2,45.918,45.918,45918624,45918564,60,86.650,36.250,2.250,10.200,1.600,10.100,26.200,1|0,results/raw/checksum_modes/preserve/server_2c.log
+software,2,45.284,45.284,45283732,45283732,0,91.199,23.800,2.050,10.400,30.400,10.448,14.150,1|0,results/raw/checksum_modes/software/server_2c.log
+offload,4,93.056,93.056,93056840,93056750,90,88.050,27.275,2.300,10.500,12.350,12.725,22.925,1|2|3|0,results/raw/checksum_modes/offload/server_4c.log
+preserve,4,93.342,93.341,93342166,93340962,1204,87.900,28.975,3.150,13.025,1.850,12.325,28.525,1|2|3|0,results/raw/checksum_modes/preserve/server_4c.log
+software,4,91.053,91.053,91052986,91052986,0,90.995,19.120,2.125,10.600,30.726,10.750,17.625,1|2|3|0,results/raw/checksum_modes/software/server_4c.log
+offload,6,109.187,109.185,109187120,109185275,1845,113.168,27.207,6.139,19.278,16.295,12.941,31.309,1|2|3|4|5|0,results/raw/checksum_modes/offload/server_6c.log
+preserve,6,105.041,105.027,105040988,105026972,14016,116.675,34.230,8.860,23.463,1.953,21.375,26.776,1|2|3|4|5|0,results/raw/checksum_modes/preserve/server_6c.log
+software,6,104.617,104.616,104617120,104616924,196,118.252,24.897,5.022,15.767,35.431,11.551,25.589,1|2|3|4|5|0,results/raw/checksum_modes/software/server_6c.log
+offload,8,109.827,109.827,109826890,109825910,980,150.187,42.940,11.049,27.961,24.124,12.725,31.413,1|2|3|4|5|6|7|0,results/raw/checksum_modes/offload/server_8c.log
+preserve,8,106.678,106.676,106677964,106675018,2946,154.175,39.725,16.250,33.761,2.000,35.900,26.488,1|2|3|4|5|6|7|0,results/raw/checksum_modes/preserve/server_8c.log
+software,8,109.867,109.867,109866274,109865726,548,147.726,41.809,7.596,23.150,34.915,10.907,29.433,1|2|3|4|5|6|7|0,results/raw/checksum_modes/software/server_8c.log

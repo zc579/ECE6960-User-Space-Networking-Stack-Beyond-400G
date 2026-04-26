@@ -6,7 +6,7 @@ This repo contains a DPDK IPv4/UDP echo server and a packet generator client for
 - `app/echo_server.c`: echo server with per-worker profiling
 - `app/packet_gen_client.c`: latency test plus single-core or multi-core throughput generator
 - `app/dpdk.h`: shared DPDK config, packet format, RSS setup, and helpers
-- `analysis/plot_single_core_stage_breakdown.py`: plot one server `[profile]` sample as a stage breakdown
+- `analysis/plot_scaling_stage_cycles.py`: summarize and plot multi-core stage cycles from server logs
 
 ## Prerequisites
 - DPDK must be installed and visible to `pkg-config`
@@ -121,25 +121,28 @@ Example:
 For a multi-core run, total server throughput is the sum of all worker lines.
 
 ## Plotting
-Save the server log and run the plotting script:
+Save the 1/2/4/6/8-core server logs under `results/raw/scaling/`:
 
-```bash
-mkdir -p results/raw
-sudo ./echo_server -l 0 -- 1 | tee results/raw/echo.log
-python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo.log
+```text
+results/raw/scaling/server_1c.log
+results/raw/scaling/server_2c.log
+results/raw/scaling/server_4c.log
+results/raw/scaling/server_6c.log
+results/raw/scaling/server_8c.log
 ```
 
-Optional flags:
+Then generate the plot and CSV:
 
 ```bash
-python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo.log --mode last
-python3 analysis/plot_single_core_stage_breakdown.py results/raw/echo.log --output results/processed/stage_breakdown.png --title "Single-Core Echo Breakdown"
+python3 analysis/plot_scaling_stage_cycles.py
 ```
 
-Notes:
-- the script reads `[profile]` lines from the server log
-- by default it picks the sample with the highest `rx_mpps`
-- on a multi-core log it still plots one worker sample at a time, not an aggregate
+Outputs:
+- `results/processed/100g_scaling_stage_cycles.png`
+- `results/processed/100g_scaling_stage_cycles_summary.csv`
+
+The script reads `[profile]` lines, selects the highest-throughput complete
+queue round for each core count, and reports weighted average stage cycles.
 
 ## Minimal Environment Checklist
 If the binaries do not run yet, verify these first:

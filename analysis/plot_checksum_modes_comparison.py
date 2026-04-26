@@ -113,16 +113,19 @@ def summarize_log(mode: str, log_path: Path):
         raise ValueError(f"No valid [profile] lines found in {log_path}")
 
     cores = infer_core_count(log_path, samples)
-    rounds = collect_rounds(samples, cores)
-    loaded_rounds = [r for r in rounds if sum(sample["rx_pkts"] for sample in r) > 0]
+    loaded_rounds = [
+        round_samples
+        for round_samples in collect_rounds(samples, cores)
+        if sum(sample["rx_pkts"] for sample in round_samples) > 0
+    ]
     if not loaded_rounds:
         raise ValueError(f"No loaded complete profile rounds found in {log_path}")
 
     best_round = max(
         loaded_rounds,
-        key=lambda r: (
-            sum(sample["rx_pkts"] for sample in r),
-            sum(sample["rx_mpps"] for sample in r),
+        key=lambda round_samples: (
+            sum(sample["rx_pkts"] for sample in round_samples),
+            sum(sample["rx_mpps"] for sample in round_samples),
         ),
     )
 
@@ -151,7 +154,7 @@ def find_logs(raw_root: Path, modes):
         mode_logs = sorted(mode_dir.glob("server_*c.log"))
         if not mode_logs:
             raise FileNotFoundError(f"No logs found under {mode_dir}")
-        logs.extend((mode, path) for path in mode_logs)
+        logs.extend((mode, log_path) for log_path in mode_logs)
     return logs
 
 
@@ -179,7 +182,7 @@ def write_csv(summaries, output_path: Path):
     with output_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for item in sorted(summaries, key=lambda s: (s["cores"], s["mode"])):
+        for item in sorted(summaries, key=lambda row: (row["cores"], row["mode"])):
             row = dict(item)
             for key in fieldnames:
                 if isinstance(row.get(key), float):
@@ -190,19 +193,19 @@ def write_csv(summaries, output_path: Path):
 
 
 def plot_comparison(summaries, output_path: Path, title: str):
-    modes = sorted({item["mode"] for item in summaries})
+    modes = [mode for mode in ["software", "offload", "preserve", "none"]
+             if any(item["mode"] == mode for item in summaries)]
     cores = sorted({item["cores"] for item in summaries})
     by_key = {(item["mode"], item["cores"]): item for item in summaries}
 
     x = list(range(len(cores)))
-    width = 0.36 if len(modes) == 2 else 0.75 / max(len(modes), 1)
+    width = 0.24 if len(modes) == 3 else 0.75 / max(len(modes), 1)
     offsets = {
         mode: (idx - (len(modes) - 1) / 2.0) * width
         for idx, mode in enumerate(modes)
     }
 
-    fig, ax = plt.subplots(figsize=(13, 7))
-
+    fig, ax = plt.subplots(figsize=(14, 7.5))
     for mode in modes:
         bottoms = [0.0] * len(cores)
         mode_x = [pos + offsets[mode] for pos in x]
@@ -219,7 +222,7 @@ def plot_comparison(summaries, output_path: Path, title: str):
                 bottom=bottoms,
                 color=STAGE_COLORS[label],
                 edgecolor="black",
-                linewidth=0.55,
+                linewidth=0.5,
                 label=label if mode == modes[0] else None,
             )
             bottoms = [bottom + height for bottom, height in zip(bottoms, heights)]
@@ -230,12 +233,12 @@ def plot_comparison(summaries, output_path: Path, title: str):
                 continue
             ax.text(
                 xpos,
-                item["total_cycles_per_pkt"] + 2.5,
+                item["total_cycles_per_pkt"] + 2.0,
                 f"{mode}\n{item['rx_mpps']:.1f} Mpps\n"
                 f"{item['total_cycles_per_pkt']:.1f} cyc/pkt",
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                fontsize=7.5,
             )
 
     ax.set_xticks(x, [f"{core} cores" for core in cores])
@@ -252,35 +255,35 @@ def plot_comparison(summaries, output_path: Path, title: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare software checksum and TX checksum offload profile logs."
+        description="Compare software, offload, and preserve checksum modes."
     )
     parser.add_argument(
         "--raw-root",
         type=Path,
-        default=Path("results/raw/checksum"),
-        help="Root containing software/ and offload/ server logs.",
+        default=Path("results/raw/checksum_modes"),
+        help="Root containing software/offload/preserve server logs.",
     )
     parser.add_argument(
         "--modes",
         nargs="+",
-        default=["software", "offload"],
+        default=["software", "offload", "preserve"],
         help="Mode directories under --raw-root to compare.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("results/processed/checksum_offload_stage_cycles.png"),
+        default=Path("results/processed/checksum_modes_stage_cycles.png"),
         help="Output plot path.",
     )
     parser.add_argument(
         "--summary-csv",
         type=Path,
-        default=Path("results/processed/checksum_offload_summary.csv"),
+        default=Path("results/processed/checksum_modes_summary.csv"),
         help="Output CSV path.",
     )
     parser.add_argument(
         "--title",
-        default="Checksum Offload Comparison",
+        default="Checksum Modes Stage Cycles",
         help="Plot title.",
     )
     args = parser.parse_args()

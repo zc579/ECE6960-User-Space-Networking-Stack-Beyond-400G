@@ -38,6 +38,7 @@
 enum checksum_mode {
     CHECKSUM_MODE_SOFTWARE,
     CHECKSUM_MODE_OFFLOAD,
+    CHECKSUM_MODE_PRESERVE,
     CHECKSUM_MODE_NONE,
 };
 
@@ -54,6 +55,8 @@ checksum_mode_name(enum checksum_mode mode)
         return "software";
     case CHECKSUM_MODE_OFFLOAD:
         return "offload";
+    case CHECKSUM_MODE_PRESERVE:
+        return "preserve";
     case CHECKSUM_MODE_NONE:
         return "none";
     default:
@@ -196,7 +199,9 @@ print_profile(const struct echo_profile *stats,
 }
 
 static int
-port_init_checksum(uint8_t port, struct rte_mempool *mbuf_pool, unsigned int n_queues)
+port_init_checksum_exp(uint8_t port,
+                       struct rte_mempool *mbuf_pool,
+                       unsigned int n_queues)
 {
     struct rte_eth_conf port_conf = port_conf_default;
     const uint16_t rx_rings = n_queues, tx_rings = n_queues;
@@ -449,8 +454,11 @@ run_server_worker(void *arg)
                                   RTE_MBUF_F_TX_IP_CKSUM |
                                   RTE_MBUF_F_TX_UDP_CKSUM;
                 ipv4_hdr->hdr_checksum = 0;
-                udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr,
-                                                           mbuf->ol_flags);
+                udp_hdr->dgram_cksum =
+                    rte_ipv4_phdr_cksum(ipv4_hdr, mbuf->ol_flags);
+            } else if (selected_checksum_mode == CHECKSUM_MODE_NONE) {
+                ipv4_hdr->hdr_checksum = 0;
+                udp_hdr->dgram_cksum = 0;
             }
         }
         t1 = rte_get_timer_cycles();
@@ -500,10 +508,11 @@ parse_echo_args(int argc, char *argv[])
 
     if (argc < 2 || argc > 3) {
         printf("argument number incorrect: %d\n", argc);
-        printf("usage: sudo ./echo_server_checksum_offload "
-               "[--checksum-mode=software|offload|none] <NUM_WORKERS>\n");
-        printf("example: sudo ./echo_server_checksum_offload "
-               "--checksum-mode=offload 2\n");
+        printf("usage: sudo ./echo_server_checksum_exp "
+               "[--checksum-mode=software|offload|preserve|none] "
+               "<NUM_WORKERS>\n");
+        printf("example: sudo ./echo_server_checksum_exp "
+               "--checksum-mode=preserve 4\n");
         return -EINVAL;
     }
 
@@ -517,6 +526,8 @@ parse_echo_args(int argc, char *argv[])
                 selected_checksum_mode = CHECKSUM_MODE_SOFTWARE;
             } else if (strcmp(mode_arg, "offload") == 0) {
                 selected_checksum_mode = CHECKSUM_MODE_OFFLOAD;
+            } else if (strcmp(mode_arg, "preserve") == 0) {
+                selected_checksum_mode = CHECKSUM_MODE_PRESERVE;
             } else if (strcmp(mode_arg, "none") == 0) {
                 selected_checksum_mode = CHECKSUM_MODE_NONE;
             } else {
@@ -573,7 +584,7 @@ main(int argc, char *argv[])
     }
 
     /* Initialize port. */
-    if (port_init_checksum(dpdk_port, rx_mbuf_pool, num_queues) != 0) {
+    if (port_init_checksum_exp(dpdk_port, rx_mbuf_pool, num_queues) != 0) {
         rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu8 "\n", dpdk_port);
     }
 

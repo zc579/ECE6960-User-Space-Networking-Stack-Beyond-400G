@@ -1,0 +1,11 @@
+mode,cores,rx_mpps,tx_mpps,rx_pkts,tx_pkts,tx_drops,total_cycles_per_pkt,rx_cycles_per_pkt,parse_cycles_per_pkt,rewrite_cycles_per_pkt,checksum_cycles_per_pkt,tx_cycles_per_pkt,other_cycles_per_pkt,queues_seen,log_path
+offload,1,25.339,25.339,25339440,25339415,25,79.900,23.900,1.700,10.400,13.900,11.300,18.800,0,results/raw/checksum/offload/server_1c.log
+software,1,24.034,24.034,24034176,24034176,0,85.100,20.900,1.700,10.300,30.100,8.900,13.300,0,results/raw/checksum/software/server_1c.log
+offload,2,46.492,46.492,46491904,46491904,0,88.400,27.100,2.000,10.400,13.350,12.799,22.700,1|0,results/raw/checksum/offload/server_2c.log
+software,2,45.323,45.323,45323020,45323020,0,91.149,23.651,1.950,10.400,30.500,10.399,14.250,1|0,results/raw/checksum/software/server_2c.log
+offload,4,93.839,93.839,93838832,93838768,64,88.025,21.450,2.300,10.725,10.975,13.075,29.525,1|2|3|0,results/raw/checksum/offload/server_4c.log
+software,4,90.955,90.955,90955696,90955696,0,91.040,18.768,2.099,10.945,30.801,10.501,17.926,1|2|3|0,results/raw/checksum/software/server_4c.log
+offload,6,109.453,109.453,109454096,109452600,1496,113.032,26.165,5.907,20.920,16.433,13.004,30.621,1|2|3|4|5|0,results/raw/checksum/offload/server_6c.log
+software,6,109.355,109.355,109355848,109355692,156,113.245,23.673,4.581,16.745,34.065,10.752,23.425,1|2|3|4|5|0,results/raw/checksum/software/server_6c.log
+offload,8,102.015,102.015,102016640,102016024,616,148.730,43.969,4.707,14.803,11.946,13.052,60.236,1|2|3|4|5|6|7|0,results/raw/checksum/offload/server_8c.log
+software,8,109.530,109.530,109531016,109530705,311,151.337,28.975,11.325,29.163,48.012,11.075,22.737,1|2|3|4|5|6|7|0,results/raw/checksum/software/server_8c.log

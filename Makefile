@@ -20,7 +20,7 @@ CFLAGS += $(EXTRA_CFLAGS)
 
 # dpdk_echo: $(SRCS) Makefile $(PC_FILE)
 # 	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
-all: packet_gen_client packet_gen_client_fast echo_server echo_server_checksum_exp echo_server_checksum_txbuf_exp
+all: packet_gen_client packet_gen_client_fast echo_server echo_server_checksum_exp echo_server_checksum_txbuf_exp echo_server_checksum_txbuf_prefetch_exp
 
 packet_gen_client: $(APP_DIR)/packet_gen_client.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
 	$(CC) $(CFLAGS) $(APP_DIR)/packet_gen_client.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
@@ -37,5 +37,8 @@ echo_server_checksum_exp: $(APP_DIR)/echo_server_checksum_exp.c $(APP_DIR)/dpdk.
 echo_server_checksum_txbuf_exp: $(APP_DIR)/echo_server_checksum_txbuf_exp.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
 	$(CC) $(CFLAGS) $(APP_DIR)/echo_server_checksum_txbuf_exp.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
 
+echo_server_checksum_txbuf_prefetch_exp: $(APP_DIR)/echo_server_checksum_txbuf_prefetch_exp.c $(APP_DIR)/dpdk.h Makefile $(PC_FILE)
+	$(CC) $(CFLAGS) $(APP_DIR)/echo_server_checksum_txbuf_prefetch_exp.c -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
+
 clean:
-	rm -f packet_gen_client packet_gen_client_fast echo_server echo_server_checksum_exp echo_server_checksum_txbuf_exp
+	rm -f packet_gen_client packet_gen_client_fast echo_server echo_server_checksum_exp echo_server_checksum_txbuf_exp echo_server_checksum_txbuf_prefetch_exp
